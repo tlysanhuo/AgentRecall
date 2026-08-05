@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   extractClaudeContextComponents,
+  extractCodexContextSnapshot,
   extractCodexContextComponents,
   extractSessionContextComponents,
   truncateContextText,
@@ -28,6 +29,57 @@ afterEach(() => {
 });
 
 describe("session context components", () => {
+  it("extracts the complete Codex context, available Skills, and used Skills", async () => {
+    const root = temporaryDirectory();
+    const filePath = path.join(root, "rollout-observed.jsonl");
+    writeJsonLines(filePath, [
+      {
+        type: "session_meta",
+        payload: {
+          base_instructions: "base system",
+          dynamic_tools: [{ name: "exec_command", description: "run" }],
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "developer",
+          content: [{
+            type: "input_text",
+            text: "## Skills\n\n### Available skills\n- brainstorming: Explore ideas (file: r1/brainstorming/SKILL.md)\n- diagnose: Debug carefully (file: r1/diagnose/SKILL.md)\n- unused: Not invoked (file: r1/unused/SKILL.md)",
+          }],
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call",
+          name: "exec_command",
+          input: { path: "/tmp/skills/brainstorming/SKILL.md" },
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          output: "Opened C:\\Users\\me\\skills\\diagnose\\SKILL.md",
+        },
+      },
+    ]);
+
+    const snapshot = await extractCodexContextSnapshot(filePath);
+
+    expect(snapshot).toMatchObject({
+      systemInstructions: "base system",
+      developerInstructions: [expect.stringContaining("Available skills")],
+      availableSkills: ["brainstorming", "diagnose", "unused"],
+      usedSkills: ["brainstorming", "diagnose"],
+    });
+    expect(snapshot.tools).toEqual([{ name: "exec_command", description: "run" }]);
+    expect(snapshot.toolNames).toEqual(["exec_command"]);
+  });
+
   it("extracts Codex base instructions, developer messages, and tool names", async () => {
     const root = temporaryDirectory();
     const filePath = path.join(root, "rollout.jsonl");

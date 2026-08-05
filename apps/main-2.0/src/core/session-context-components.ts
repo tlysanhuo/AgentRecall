@@ -41,8 +41,6 @@ const CLAUDE_SOURCES = new Set(["claude-cli", "claude-app", "tclaude-cli"]);
 const PREVIEW_CHAR_LIMIT = 12_000;
 /** Cap payload text so React/IPC never materialize multi‑MB strings. */
 const COMPONENT_TEXT_CHAR_LIMIT = 48_000;
-/** After session_meta, stop once developer text is capped (late reinjections are truncated). */
-const CODEX_DEVELOPER_CHAR_BUDGET = COMPONENT_TEXT_CHAR_LIMIT;
 
 type CacheEntry = {
   mtimeMs: number;
@@ -104,21 +102,45 @@ export async function extractSessionContextComponents(options: {
   }
 }
 
-export async function extractCodexContextComponents(filePath: string): Promise<ContextComponent[]> {
+export interface CodexContextSnapshot {
+  systemInstructions: string;
+  developerInstructions: string[];
+  tools: unknown[];
+  toolNames: string[];
+  availableSkills: string[];
+  usedSkills: string[];
+}
+
+interface CodexContextData {
+  snapshot: CodexContextSnapshot;
+  toolsFromDynamic: boolean;
+  toolsFromCalls: boolean;
+}
+
+export async function extractCodexContextSnapshot(filePath: string): Promise<CodexContextSnapshot> {
+  return (await extractCodexContextData(filePath)).snapshot;
+}
+
+async function extractCodexContextData(filePath: string): Promise<CodexContextData> {
   let sessionMeta: Record<string, unknown> | null = null;
   const developerTexts: string[] = [];
   const toolNames = new Set<string>();
-  let developerChars = 0;
+  const tools: unknown[] = [];
+  const usedSkills = new Set<string>();
   let toolsFromDynamic = false;
   let toolsFromCalls = false;
 
   for await (const row of readJsonObjects(filePath, isCodexContextLine)) {
     const payload = objectField(row, "payload");
+    if (!isNarrativeCodexRow(row, payload)) collectUsedSkillNames(row, usedSkills);
     if (row.type === "session_meta" && payload) {
       sessionMeta = payload;
-      const dynamicNames = toolNamesFromDynamic(payload.dynamic_tools);
-      if (dynamicNames.length > 0) toolsFromDynamic = true;
-      for (const name of dynamicNames) toolNames.add(name);
+      const dynamicTools = dynamicToolSpecs(payload.dynamic_tools);
+      if (dynamicTools.length > 0) toolsFromDynamic = true;
+      for (const tool of dynamicTools) {
+        tools.push(tool);
+        for (const name of toolNamesFromDynamic([tool])) toolNames.add(name);
+      }
       continue;
     }
 
@@ -132,19 +154,49 @@ export async function extractCodexContextComponents(filePath: string): Promise<C
     }
 
     if (row.type !== "response_item" || !payload || payload.type !== "message") continue;
-    // Keep scanning for tool calls after the developer budget is full — modern
-    // Codex rollouts often omit session_meta.dynamic_tools entirely.
-    if (developerChars >= CODEX_DEVELOPER_CHAR_BUDGET) continue;
     const role = typeof payload.role === "string" ? payload.role : "";
     if (role !== "developer" && role !== "system") continue;
     const text = messageText(payload.content).trim();
     if (!text) continue;
     developerTexts.push(text);
-    developerChars += text.length;
   }
 
+  const availableSkills = new Set<string>();
+  for (const developerText of developerTexts) {
+    for (const skill of availableSkillNames(developerText)) availableSkills.add(skill);
+  }
+
+  return {
+    snapshot: {
+      systemInstructions: baseInstructionsText(sessionMeta?.base_instructions).trim(),
+      developerInstructions: developerTexts,
+      tools,
+      toolNames: [...toolNames].sort((left, right) => left.localeCompare(right)),
+      availableSkills: [...availableSkills].sort((left, right) => left.localeCompare(right)),
+      usedSkills: [...usedSkills].sort((left, right) => left.localeCompare(right)),
+    },
+    toolsFromDynamic,
+    toolsFromCalls,
+  };
+}
+
+function isNarrativeCodexRow(
+  row: Record<string, unknown>,
+  payload: Record<string, unknown> | null,
+): boolean {
+  if (row.type === "session_meta") return true;
+  if (!payload) return false;
+  return payload.type === "message"
+    || payload.type === "agent_message"
+    || payload.type === "user_message";
+}
+
+export async function extractCodexContextComponents(filePath: string): Promise<ContextComponent[]> {
+  const { snapshot, toolsFromDynamic, toolsFromCalls } = await extractCodexContextData(filePath);
+  const developerTexts = snapshot.developerInstructions;
+
   const components: ContextComponent[] = [];
-  const baseInstructions = clampComponentText(baseInstructionsText(sessionMeta?.base_instructions).trim());
+  const baseInstructions = clampComponentText(snapshot.systemInstructions);
   if (baseInstructions.text) {
     components.push({
       kind: "system_instructions",
@@ -178,8 +230,7 @@ export async function extractCodexContextComponents(filePath: string): Promise<C
     });
   }
 
-  const tools = [...toolNames].sort((a, b) => a.localeCompare(b));
-  if (tools.length > 0) {
+  if (snapshot.toolNames.length > 0) {
     const sourceHint = toolsFromDynamic && toolsFromCalls
       ? "session_meta.dynamic_tools + tool calls"
       : toolsFromDynamic
@@ -189,7 +240,7 @@ export async function extractCodexContextComponents(filePath: string): Promise<C
       kind: "tool_inventory",
       title: "工具清单",
       fidelity: "listing",
-      items: tools,
+      items: snapshot.toolNames,
       sourceHint,
       ...(!toolsFromDynamic && toolsFromCalls
         ? { note: "由本会话中实际出现的 tool call 反推；未调用过的工具不会出现在此清单。" }
@@ -323,7 +374,8 @@ function isCodexContextLine(line: string): boolean {
     || line.includes("\"system\"")
     || line.includes("function_call")
     || line.includes("custom_tool_call")
-    || line.includes("mcp_tool_call");
+    || line.includes("mcp_tool_call")
+    || line.toLocaleLowerCase().includes("skill.md");
 }
 
 function isClaudeContextLine(line: string): boolean {
@@ -359,6 +411,64 @@ function toolNamesFromDynamic(dynamicTools: unknown): string[] {
     collectDynamicToolNames(raw, names);
   }
   return names;
+}
+
+function dynamicToolSpecs(dynamicTools: unknown): unknown[] {
+  if (!Array.isArray(dynamicTools)) return [];
+  const tools: unknown[] = [];
+  for (const raw of dynamicTools) collectDynamicToolSpecs(raw, tools);
+  return tools;
+}
+
+function collectDynamicToolSpecs(raw: unknown, tools: unknown[]): void {
+  if (!isObject(raw)) return;
+  const functionSpec = objectField(raw, "Function") ?? objectField(raw, "function");
+  if (functionSpec) {
+    tools.push(functionSpec);
+    return;
+  }
+  const namespace = objectField(raw, "Namespace") ?? objectField(raw, "namespace");
+  if (namespace) {
+    const nested = Array.isArray(namespace.tools) ? namespace.tools : [];
+    for (const child of nested) collectDynamicToolSpecs(child, tools);
+    return;
+  }
+  if (typeof raw.name === "string") tools.push(raw);
+}
+
+function availableSkillNames(text: string): string[] {
+  const names = new Set<string>();
+  const lines = text.split(/\r?\n/gu);
+  let inCatalog = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^###\s+Available skills\s*$/iu.test(trimmed)) {
+      inCatalog = true;
+      continue;
+    }
+    if (inCatalog && /^#{1,3}\s+/u.test(trimmed)) break;
+    if (!inCatalog) continue;
+    const match = trimmed.match(/^-\s+([A-Za-z0-9][\w.-]*(?::[A-Za-z0-9][\w.-]*)*):(?:\s|$)/u);
+    if (match?.[1]) names.add(match[1]);
+  }
+  return [...names];
+}
+
+function collectUsedSkillNames(value: unknown, names: Set<string>): void {
+  if (typeof value === "string") {
+    const normalized = value.replace(/\\/gu, "/");
+    const matcher = /(?:^|[^A-Za-z0-9._-])skills\/([A-Za-z0-9][\w.:-]*)\/SKILL\.md\b/giu;
+    for (const match of normalized.matchAll(matcher)) {
+      if (match[1]) names.add(match[1]);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const child of value) collectUsedSkillNames(child, names);
+    return;
+  }
+  if (!isObject(value)) return;
+  for (const child of Object.values(value)) collectUsedSkillNames(child, names);
 }
 
 /** Infer tool names from response_item payloads when dynamic_tools is absent. */
