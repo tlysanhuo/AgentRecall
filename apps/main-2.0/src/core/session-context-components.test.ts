@@ -230,10 +230,22 @@ describe("session context components", () => {
           call_id: "call_late",
         },
       },
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "developer",
+          content: [{ type: "input_text", text: "late complete-only instructions" }],
+        },
+      },
     ]);
 
     const components = await extractCodexContextComponents(filePath);
     expect(components.find((item) => item.kind === "tool_inventory")?.items).toEqual(["exec"]);
+    expect(components.find((item) => item.kind === "developer_instructions")?.text)
+      .not.toContain("late complete-only instructions");
+    expect((await extractCodexContextSnapshot(filePath)).developerInstructions)
+      .toContain("late complete-only instructions");
   });
 
   it("extracts Claude attachment listings without fabricating system prompts", async () => {

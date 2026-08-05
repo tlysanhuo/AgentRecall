@@ -421,9 +421,22 @@ function TurnEvents({ sessionId, turnId, language }: { sessionId: string; turnId
       className="codex-observation-turn-events"
       onToggle={(event) => {
         if (!event.currentTarget.open || events !== null) return;
-        void window.sessionSearch.getCodexObservationEvents(sessionId, "timeline", 0, 200)
-          .then((page) => setEvents(page.events.filter((item) => item.turnId === turnId)))
-          .catch(() => setEvents([]));
+        void (async () => {
+          const turnEvents: CodexObservationEventSummary[] = [];
+          let afterSeq = 0;
+          for (;;) {
+            const page = await window.sessionSearch.getCodexObservationEvents(
+              sessionId,
+              "timeline",
+              afterSeq,
+              200,
+            );
+            turnEvents.push(...page.events.filter((item) => item.turnId === turnId));
+            if (page.nextAfterSeq === null) break;
+            afterSeq = page.nextAfterSeq;
+          }
+          setEvents(turnEvents);
+        })().catch(() => setEvents([]));
       }}
     >
       <summary>{l("Turn timeline", "本轮时间线")}</summary>

@@ -140,7 +140,8 @@ describe("CodexObservationService", () => {
   });
 
   it("enforces one active turn, resolves approvals, and cancels by native turn id", async () => {
-    const { service, fake, workDir } = await createFixture();
+    const { service, fake, workDir, codexHome } = await createFixture();
+    await writeRollout(codexHome);
     const session = await service.createSession({ workDir, modelId: "gpt-5", reasoningEffort: "high" });
     await service.sendMessage(session.id, "run command");
     await expect(service.sendMessage(session.id, "too soon")).rejects.toThrow(/already running/i);
@@ -158,7 +159,10 @@ describe("CodexObservationService", () => {
       method: "turn/cancel",
       params: { threadId: "thread-1", turnId: "native-turn-1" },
     });
-    expect((await service.getSession(session.id)).turns[0]?.status).toBe("cancelled");
+    const detail = await service.getSession(session.id);
+    expect(detail.turns[0]?.status).toBe("cancelled");
+    expect(detail.session.integrityState).toBe("complete");
+    expect((await service.readEvents(session.id, "rollout", 0, 20)).events).toHaveLength(2);
   });
 
   it("marks unexpected app-server exits and journal failures as errors", async () => {
@@ -190,6 +194,8 @@ describe("CodexObservationService", () => {
         integrityState: "incomplete",
       });
     });
+    await failed.service.stopSession(failedSession.id);
+    expect((await failed.service.getSession(failedSession.id)).session.lifecycleState).toBe("error");
   });
 
   it("recovers stale state and deletes only copied observation data", async () => {
@@ -253,6 +259,7 @@ describe("CodexObservationService", () => {
     const detail = await restarted.getSession("stale-observation");
     expect(detail.session).toMatchObject({
       lifecycleState: "error",
+      integrityState: "complete",
       lastError: INTERRUPTED_MESSAGE,
     });
     expect(detail.turns[0]).toMatchObject({ status: "interrupted" });

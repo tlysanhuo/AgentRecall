@@ -45,10 +45,13 @@ export function CodexObservationInspector({
         afterSeq,
         100,
       );
-      setEvents((current) => reset ? page.events : [
-        ...current,
-        ...page.events.filter((event) => !current.some((candidate) => candidate.seq === event.seq)),
-      ]);
+      setEvents((current) => {
+        if (reset) return page.events;
+        return [
+          ...current,
+          ...page.events.filter((event) => !current.some((candidate) => candidate.seq === event.seq)),
+        ].sort((left, right) => left.seq - right.seq);
+      });
       setNextAfterSeq(page.nextAfterSeq);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -107,7 +110,7 @@ export function CodexObservationInspector({
         </div>
         <span className="codex-observation-size">{formatBytes(detail.recordBytes)}</span>
       </header>
-      <nav className="codex-observation-inspector-tabs" aria-label={l("Observation detail", "观测详情")}> 
+      <nav className="codex-observation-inspector-tabs" aria-label={l("Observation detail", "观测详情")}>
         <button className={tab === "context" ? "active" : ""} onClick={() => setTab("context")}>Context</button>
         <button className={tab === "timeline" ? "active" : ""} onClick={() => setTab("timeline")}>{l("Timeline", "时间线")}</button>
         <button className={tab === "raw" ? "active" : ""} onClick={() => setTab("raw")}>{l("Raw", "原始记录")}</button>

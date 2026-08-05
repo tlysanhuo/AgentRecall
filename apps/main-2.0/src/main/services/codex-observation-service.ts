@@ -141,7 +141,10 @@ export class CodexObservationService {
       .filter((session) => Boolean(session.threadId))
       .map(async (session) => {
         const runtime = await this.runtimeFor(session);
-        await this.captureRollout(session, runtime);
+        const integrityState = await this.finalizeRecording(session.id, runtime);
+        if (!runtime.recordingFailed) {
+          await this.repository.updateSession(session.id, { integrityState });
+        }
       }));
   }
 
@@ -288,8 +291,10 @@ export class CodexObservationService {
       usage: numericUsage(active.usage),
       endedAt: this.now().toISOString(),
     });
-    await this.repository.updateSession(id, { lifecycleState: "idle" });
     this.recordTimeline(runtime, { type: "system", content: "Codex turn cancelled." });
+    const integrityState = await this.finalizeRecording(id, runtime);
+    if (runtime.recordingFailed) return;
+    await this.repository.updateSession(id, { lifecycleState: "idle", integrityState });
     this.publishSession(id);
   }
 
@@ -305,7 +310,9 @@ export class CodexObservationService {
     runtime.attachPromise = null;
     await client?.shutdown().catch(() => undefined);
     await runtime.journal.flush().catch((error) => this.handleRecordingFailure(id, error));
-    await this.repository.updateSession(id, { lifecycleState: "stopped" });
+    if (!runtime.recordingFailed) {
+      await this.repository.updateSession(id, { lifecycleState: "stopped" });
+    }
     this.publishSession(id);
   }
 
@@ -607,25 +614,11 @@ export class CodexObservationService {
       error,
       endedAt: this.now().toISOString(),
     });
-    const session = await this.requireSession(sessionId);
-    let sourceAvailable = false;
-    try {
-      await runtime.journal.flush();
-      const captured = await this.captureRollout(session, runtime);
-      sourceAvailable = captured.sourceAvailable;
-    } catch (recordingError) {
-      await this.handleRecordingFailure(sessionId, recordingError);
-    }
-    const integrityState = runtime.recordingFailed || !sourceAvailable ? "incomplete" : "complete";
-    if (!runtime.recordingFailed) {
-      await runtime.journal.markIntegrity(
-        integrityState,
-        sourceAvailable ? undefined : "Codex rollout source was unavailable.",
-      ).catch((recordingError) => this.handleRecordingFailure(sessionId, recordingError));
-    }
+    const integrityState = await this.finalizeRecording(sessionId, runtime);
+    if (runtime.recordingFailed) return;
     await this.repository.updateSession(sessionId, {
       lifecycleState: status === "completed" ? "idle" : "error",
-      integrityState: runtime.recordingFailed ? "incomplete" : integrityState,
+      integrityState,
       lastError: error,
     });
     this.publishSession(sessionId);
@@ -709,8 +702,11 @@ export class CodexObservationService {
         endedAt: this.now().toISOString(),
       });
     }
+    const integrityState = await this.finalizeRecording(sessionId, runtime);
+    if (runtime.recordingFailed) return;
     await this.repository.updateSession(sessionId, {
       lifecycleState: "error",
+      integrityState,
       lastError: message,
     });
     this.publishSession(sessionId);
@@ -747,6 +743,28 @@ export class CodexObservationService {
       lastError: message,
     }).catch(() => undefined);
     this.publishSession(sessionId);
+  }
+
+  private async finalizeRecording(
+    sessionId: string,
+    runtime: ObservationRuntime,
+  ): Promise<CodexObservationSession["integrityState"]> {
+    let sourceAvailable = false;
+    try {
+      await runtime.journal.flush();
+      const session = await this.requireSession(sessionId);
+      const captured = await this.captureRollout(session, runtime);
+      sourceAvailable = captured.sourceAvailable;
+      const integrityState = sourceAvailable ? "complete" : "incomplete";
+      await runtime.journal.markIntegrity(
+        integrityState,
+        sourceAvailable ? undefined : "Codex rollout source was unavailable.",
+      );
+      return integrityState;
+    } catch (error) {
+      await this.handleRecordingFailure(sessionId, error);
+      return "incomplete";
+    }
   }
 
   private async handleRuntimeError(sessionId: string, error: unknown): Promise<void> {

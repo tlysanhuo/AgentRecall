@@ -41,6 +41,8 @@ const CLAUDE_SOURCES = new Set(["claude-cli", "claude-app", "tclaude-cli"]);
 const PREVIEW_CHAR_LIMIT = 12_000;
 /** Cap payload text so React/IPC never materialize multi‑MB strings. */
 const COMPONENT_TEXT_CHAR_LIMIT = 48_000;
+/** Legacy session details only need a bounded preview of injected instructions. */
+const CODEX_DEVELOPER_CHAR_BUDGET = COMPONENT_TEXT_CHAR_LIMIT;
 
 type CacheEntry = {
   mtimeMs: number;
@@ -118,15 +120,19 @@ interface CodexContextData {
 }
 
 export async function extractCodexContextSnapshot(filePath: string): Promise<CodexContextSnapshot> {
-  return (await extractCodexContextData(filePath)).snapshot;
+  return (await extractCodexContextData(filePath, true)).snapshot;
 }
 
-async function extractCodexContextData(filePath: string): Promise<CodexContextData> {
+async function extractCodexContextData(
+  filePath: string,
+  includeCompleteDetails: boolean,
+): Promise<CodexContextData> {
   let sessionMeta: Record<string, unknown> | null = null;
   const developerTexts: string[] = [];
   const toolNames = new Set<string>();
   const tools: unknown[] = [];
   const usedSkills = new Set<string>();
+  let developerChars = 0;
   let toolsFromDynamic = false;
   let toolsFromCalls = false;
 
@@ -135,13 +141,15 @@ async function extractCodexContextData(filePath: string): Promise<CodexContextDa
       ? objectField(storedRow, "payload")!
       : storedRow;
     const payload = objectField(row, "payload");
-    if (!isNarrativeCodexRow(row, payload)) collectUsedSkillNames(row, usedSkills);
+    if (includeCompleteDetails && !isNarrativeCodexRow(row, payload)) {
+      collectUsedSkillNames(row, usedSkills);
+    }
     if (row.type === "session_meta" && payload) {
       sessionMeta = payload;
       const dynamicTools = dynamicToolSpecs(payload.dynamic_tools);
       if (dynamicTools.length > 0) toolsFromDynamic = true;
       for (const tool of dynamicTools) {
-        tools.push(tool);
+        if (includeCompleteDetails) tools.push(tool);
         for (const name of toolNamesFromDynamic([tool])) toolNames.add(name);
       }
       continue;
@@ -159,14 +167,18 @@ async function extractCodexContextData(filePath: string): Promise<CodexContextDa
     if (row.type !== "response_item" || !payload || payload.type !== "message") continue;
     const role = typeof payload.role === "string" ? payload.role : "";
     if (role !== "developer" && role !== "system") continue;
+    if (!includeCompleteDetails && developerChars >= CODEX_DEVELOPER_CHAR_BUDGET) continue;
     const text = messageText(payload.content).trim();
     if (!text) continue;
     developerTexts.push(text);
+    developerChars += text.length;
   }
 
   const availableSkills = new Set<string>();
-  for (const developerText of developerTexts) {
-    for (const skill of availableSkillNames(developerText)) availableSkills.add(skill);
+  if (includeCompleteDetails) {
+    for (const developerText of developerTexts) {
+      for (const skill of availableSkillNames(developerText)) availableSkills.add(skill);
+    }
   }
 
   return {
@@ -195,7 +207,7 @@ function isNarrativeCodexRow(
 }
 
 export async function extractCodexContextComponents(filePath: string): Promise<ContextComponent[]> {
-  const { snapshot, toolsFromDynamic, toolsFromCalls } = await extractCodexContextData(filePath);
+  const { snapshot, toolsFromDynamic, toolsFromCalls } = await extractCodexContextData(filePath, false);
   const developerTexts = snapshot.developerInstructions;
 
   const components: ContextComponent[] = [];
