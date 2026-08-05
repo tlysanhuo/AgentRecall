@@ -2,7 +2,7 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { normalizeCodexNotification, createCodexStreamState } from "./codex-events";
 import type { AgentEvent } from "../../../shared/types";
-import { spawnCli } from "../../platform/cli-launcher";
+import { spawnCli, terminateCliProcessTree } from "../../platform/cli-launcher";
 
 interface RpcPending {
   resolve: (value: unknown) => void;
@@ -21,6 +21,14 @@ export interface CodexRpcClientOptions {
   onStderr?: (text: string) => void;
   onExit?: (code: number | null, signal: NodeJS.Signals | null, stderr: string) => void;
   requiredMcpTools?: Record<string, readonly string[]>;
+  onRawMessage?: (event: CodexRpcObservation) => void;
+}
+
+export interface CodexRpcObservation {
+  direction: "client_to_server" | "server_to_client";
+  line: string;
+  message?: Record<string, unknown>;
+  parseError?: boolean;
 }
 
 const REQUEST_TIMEOUT_MS = 60_000;
@@ -48,6 +56,7 @@ export class CodexRpcClient {
       cwd: this.options.cwd,
       env: this.options.env ?? process.env,
       stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
     });
     if (!proc.stdin || !proc.stdout || !proc.stderr) {
       throw new Error("Codex app-server failed to create stdio pipes");
@@ -121,14 +130,14 @@ export class CodexRpcClient {
   async shutdown(): Promise<void> {
     this.rl?.close();
     this.rl = null;
-    if (this.proc && !this.proc.killed) {
-      this.proc.kill("SIGTERM");
-    }
+    if (this.proc && !this.proc.killed) terminateCliProcessTree(this.proc.pid);
     this.proc = null;
   }
 
   private write(message: Record<string, unknown>): void {
-    this.proc?.stdin.write(`${JSON.stringify(message)}\n`);
+    const line = JSON.stringify(message);
+    this.options.onRawMessage?.({ direction: "client_to_server", line, message });
+    this.proc?.stdin.write(`${line}\n`);
   }
 
   private handleLine(line: string): void {
@@ -136,10 +145,17 @@ export class CodexRpcClient {
 
     let raw: Record<string, unknown>;
     try {
-      raw = JSON.parse(line) as Record<string, unknown>;
+      const parsed = JSON.parse(line) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        this.options.onRawMessage?.({ direction: "server_to_client", line });
+        return;
+      }
+      raw = parsed as Record<string, unknown>;
     } catch {
+      this.options.onRawMessage?.({ direction: "server_to_client", line, parseError: true });
       return;
     }
+    this.options.onRawMessage?.({ direction: "server_to_client", line, message: raw });
 
     if (typeof raw.id === "number" && (raw.result !== undefined || raw.error !== undefined)) {
       const pending = this.pending.get(raw.id);

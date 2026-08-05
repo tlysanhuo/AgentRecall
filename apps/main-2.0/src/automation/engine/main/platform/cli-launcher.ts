@@ -84,6 +84,41 @@ export function spawnCli(request: CliSpawnRequest): ChildProcess {
   });
 }
 
+export function terminateCliProcessTree(
+  pid: number | undefined,
+  options: {
+    platform?: NodeJS.Platform;
+    kill?: typeof process.kill;
+    spawnKiller?: (file: string, args: string[]) => void;
+  } = {},
+): void {
+  if (!pid || !Number.isSafeInteger(pid) || pid < 1) return;
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") {
+    const spawnKiller = options.spawnKiller ?? ((file: string, args: string[]) => {
+      const killer = spawn(file, args, {
+        shell: false,
+        windowsHide: true,
+        stdio: "ignore",
+      });
+      killer.unref();
+    });
+    spawnKiller("taskkill", ["/pid", String(pid), "/T", "/F"]);
+    return;
+  }
+
+  const kill = options.kill ?? process.kill.bind(process);
+  try {
+    kill(-pid, "SIGTERM");
+  } catch {
+    try {
+      kill(pid, "SIGTERM");
+    } catch {
+      // The exact owned process already exited.
+    }
+  }
+}
+
 export async function execCli(request: CliExecRequest): Promise<{ stdout: string; stderr: string }> {
   const { executable, args = [], ...options } = request;
   const invocation = resolveCliInvocation(executable, args);
