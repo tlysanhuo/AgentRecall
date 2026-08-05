@@ -1331,4 +1331,49 @@ export const POSTGRES_MIGRATIONS: readonly PostgresMigration[] = [{
         ADD COLUMN IF NOT EXISTS skill_hash text;
     `,
   ],
+}, {
+  version: 28,
+  name: "persist Codex observation sessions",
+  statements: [
+    `
+      CREATE TABLE agent_recall.codex_observation_sessions (
+        id text PRIMARY KEY,
+        title text NOT NULL,
+        work_dir text NOT NULL,
+        model_id text,
+        reasoning_effort text,
+        thread_id text,
+        lifecycle_state text NOT NULL
+          CHECK (lifecycle_state IN ('idle', 'running', 'awaiting_approval', 'stopped', 'error')),
+        integrity_state text NOT NULL
+          CHECK (integrity_state IN ('pending', 'complete', 'incomplete')),
+        last_error text,
+        record_key text NOT NULL UNIQUE,
+        created_at timestamptz NOT NULL,
+        updated_at timestamptz NOT NULL
+      );
+
+      CREATE TABLE agent_recall.codex_observation_turns (
+        id text PRIMARY KEY,
+        session_id text NOT NULL
+          REFERENCES agent_recall.codex_observation_sessions(id) ON DELETE CASCADE,
+        turn_index integer NOT NULL,
+        native_turn_id text,
+        prompt text NOT NULL,
+        assistant_text text NOT NULL DEFAULT '',
+        status text NOT NULL
+          CHECK (status IN ('running', 'completed', 'failed', 'cancelled', 'interrupted')),
+        usage jsonb,
+        error text,
+        started_at timestamptz NOT NULL,
+        ended_at timestamptz,
+        UNIQUE (session_id, turn_index)
+      );
+
+      CREATE INDEX codex_observation_sessions_updated_idx
+        ON agent_recall.codex_observation_sessions (updated_at DESC, id DESC);
+      CREATE INDEX codex_observation_turns_session_idx
+        ON agent_recall.codex_observation_turns (session_id, turn_index);
+    `,
+  ],
 }];
