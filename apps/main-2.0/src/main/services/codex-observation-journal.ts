@@ -48,6 +48,7 @@ interface ObservationManifest {
   nextSeq: number;
   integrityState: CodexObservationIntegrityState;
   integrityReason?: string;
+  rolloutCursor?: { sourcePath: string; offset: number };
   createdAt: string;
   updatedAt: string;
 }
@@ -359,6 +360,26 @@ export class CodexObservationJournal {
       updatedAt: new Date().toISOString(),
     };
     const snapshot = { ...this.manifest };
+    await this.enqueue(() => this.writeManifest(snapshot));
+    if (this.firstWriteError) throw this.firstWriteError;
+  }
+
+  rolloutCursor(): { sourcePath: string; offset: number } | null {
+    const cursor = this.manifest.rolloutCursor;
+    return cursor ? { ...cursor } : null;
+  }
+
+  async saveRolloutCursor(cursor: { sourcePath: string; offset: number }): Promise<void> {
+    if (this.closed) throw new Error("Codex observation journal is closed.");
+    if (!Number.isSafeInteger(cursor.offset) || cursor.offset < 0) {
+      throw new Error("Invalid Codex rollout cursor.");
+    }
+    this.manifest = {
+      ...this.manifest,
+      rolloutCursor: { ...cursor },
+      updatedAt: new Date().toISOString(),
+    };
+    const snapshot = { ...this.manifest, rolloutCursor: { ...cursor } };
     await this.enqueue(() => this.writeManifest(snapshot));
     if (this.firstWriteError) throw this.firstWriteError;
   }

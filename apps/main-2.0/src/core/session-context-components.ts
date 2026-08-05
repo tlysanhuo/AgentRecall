@@ -130,7 +130,10 @@ async function extractCodexContextData(filePath: string): Promise<CodexContextDa
   let toolsFromDynamic = false;
   let toolsFromCalls = false;
 
-  for await (const row of readJsonObjects(filePath, isCodexContextLine)) {
+  for await (const storedRow of readJsonObjects(filePath, isCodexContextLine)) {
+    const row = storedRow.stream === "rollout" && objectField(storedRow, "payload")
+      ? objectField(storedRow, "payload")!
+      : storedRow;
     const payload = objectField(row, "payload");
     if (!isNarrativeCodexRow(row, payload)) collectUsedSkillNames(row, usedSkills);
     if (row.type === "session_meta" && payload) {
