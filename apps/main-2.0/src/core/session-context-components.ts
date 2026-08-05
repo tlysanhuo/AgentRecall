@@ -1,5 +1,6 @@
 import { createReadStream } from "node:fs";
 import * as fs from "node:fs/promises";
+import path from "node:path";
 import { createInterface } from "node:readline";
 import { sessionSourceDescriptor } from "./session-sources";
 import type { SessionFormat, SessionSource } from "./types";
@@ -137,9 +138,7 @@ async function extractCodexContextData(
   let toolsFromCalls = false;
 
   for await (const storedRow of readJsonObjects(filePath, isCodexContextLine)) {
-    const row = storedRow.stream === "rollout" && objectField(storedRow, "payload")
-      ? objectField(storedRow, "payload")!
-      : storedRow;
+    const row = await unwrapStoredCodexRolloutRow(filePath, storedRow);
     const payload = objectField(row, "payload");
     if (includeCompleteDetails && !isNarrativeCodexRow(row, payload)) {
       collectUsedSkillNames(row, usedSkills);
@@ -204,6 +203,26 @@ function isNarrativeCodexRow(
   return payload.type === "message"
     || payload.type === "agent_message"
     || payload.type === "user_message";
+}
+
+async function unwrapStoredCodexRolloutRow(
+  filePath: string,
+  storedRow: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (storedRow.stream !== "rollout") return storedRow;
+  const inlinePayload = objectField(storedRow, "payload");
+  if (inlinePayload) return inlinePayload;
+  const payloadRef = typeof storedRow.payloadRef === "string" ? storedRow.payloadRef : "";
+  if (!/^[a-f0-9]{64}$/u.test(payloadRef)) return storedRow;
+  try {
+    const parsed = JSON.parse(await fs.readFile(
+      path.join(path.dirname(filePath), "blobs", payloadRef),
+      "utf8",
+    )) as unknown;
+    return isObject(parsed) ? parsed : storedRow;
+  } catch {
+    return storedRow;
+  }
 }
 
 export async function extractCodexContextComponents(filePath: string): Promise<ContextComponent[]> {
@@ -390,7 +409,8 @@ function isCodexContextLine(line: string): boolean {
     || line.includes("function_call")
     || line.includes("custom_tool_call")
     || line.includes("mcp_tool_call")
-    || line.toLocaleLowerCase().includes("skill.md");
+    || line.toLocaleLowerCase().includes("skill.md")
+    || (line.includes("\"stream\":\"rollout\"") && line.includes("\"payloadRef\""));
 }
 
 function isClaudeContextLine(line: string): boolean {

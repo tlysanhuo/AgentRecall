@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -78,6 +79,57 @@ describe("session context components", () => {
     });
     expect(snapshot.tools).toEqual([{ name: "exec_command", description: "run" }]);
     expect(snapshot.toolNames).toEqual(["exec_command"]);
+  });
+
+  it("dereferences blob-backed Codex rollout context", async () => {
+    const root = temporaryDirectory();
+    const filePath = path.join(root, "rollout-observed.jsonl");
+    const blobsDirectory = path.join(root, "blobs");
+    fs.mkdirSync(blobsDirectory);
+    const storedPayloads = [
+      {
+        type: "session_meta",
+        payload: {
+          base_instructions: "blob system",
+          dynamic_tools: [{ name: "blob_tool", description: "x".repeat(20_000) }],
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "developer",
+          content: [{
+            type: "input_text",
+            text: `### Available skills\n- blob-skill: ${"catalog ".repeat(3_000)} (file: r1/blob-skill/SKILL.md)`,
+          }],
+        },
+      },
+    ];
+    const rows = storedPayloads.map((payload, index) => {
+      const contents = JSON.stringify(payload);
+      const payloadRef = createHash("sha256").update(contents).digest("hex");
+      fs.writeFileSync(path.join(blobsDirectory, payloadRef), contents, "utf8");
+      return {
+        seq: index + 1,
+        occurredAt: "2026-08-05T00:00:00.000Z",
+        stream: "rollout",
+        direction: "internal",
+        kind: payload.type,
+        method: null,
+        turnId: null,
+        preview: payload.type,
+        payloadRef,
+        redacted: false,
+      };
+    });
+    writeJsonLines(filePath, rows);
+
+    const snapshot = await extractCodexContextSnapshot(filePath);
+
+    expect(snapshot.systemInstructions).toBe("blob system");
+    expect(snapshot.tools).toEqual([expect.objectContaining({ name: "blob_tool" })]);
+    expect(snapshot.availableSkills).toEqual(["blob-skill"]);
   });
 
   it("extracts Codex base instructions, developer messages, and tool names", async () => {
