@@ -37,6 +37,7 @@ import { createProvidersApi } from "./providers";
 import { createRemoteSessionsApi } from "./remote-sessions";
 import { createMemoriesApi } from "./memories";
 import { createOpenVikingMemoryApi } from "./openviking-memory";
+import { createCodexObservationApi } from "./codex-observation";
 import { createDiscoveryApi } from "./discovery";
 import { createRulesApi } from "./rules";
 import { createSkillsApi } from "./skills";
@@ -116,6 +117,7 @@ const api = {
   getIndexStatus: (): Promise<IndexStatus> => ipcRenderer.invoke("index:status"),
   ...createAppUpdateApi(ipcRenderer),
   ...createOpenVikingMemoryApi(ipcRenderer),
+  ...createCodexObservationApi(ipcRenderer),
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke("settings:get"),
   setSettings: (settings: AppSettingsUpdate): Promise<AppSettings> => ipcRenderer.invoke("settings:set", settings),
   ...createProvidersApi(ipcRenderer),

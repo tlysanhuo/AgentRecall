@@ -77,6 +77,7 @@ import {
 import { assertMigrationTargetEnabled, isMigrationTarget, migrationTargetDescriptor } from "../core/migration-targets";
 import { writeDatabaseUrlPointer } from "../core/app-paths";
 import { PostgresDatabase } from "../core/postgres/database";
+import { PostgresCodexObservationRepository } from "../core/postgres/codex-observation-repository";
 import { POSTGRES_MIGRATIONS } from "../core/postgres/schema";
 import { diagnoseRemoteEnvironment } from "../core/remote-health";
 import {
@@ -108,8 +109,10 @@ import { OPTIONAL_SESSION_SOURCE_DESCRIPTORS } from "../core/session-sources";
 import type { AppSettings, AppSettingsUpdate } from "../core/platform";
 import { APP_UPDATE_EVENTS } from "../shared/ipc/app-update";
 import { QUOTA_EVENTS } from "../shared/ipc/quota";
+import { CODEX_OBSERVATION_EVENTS } from "../shared/ipc/codex-observation";
 import type { OpenVikingRuntimeInstallProgress } from "../core/openviking-memory";
 import { registerOpenVikingMemoryIpc } from "./ipc/openviking-memory";
+import { registerCodexObservationIpc } from "./ipc/codex-observation";
 import { registerAutomationIpc } from "./ipc/automation";
 import { registerTeamChatIpc } from "./ipc/team-chat";
 import { registerAppUpdateIpc } from "./ipc/app-update";
@@ -158,6 +161,7 @@ import {
   type OpenVikingRuntimeManifest,
 } from "./services/openviking-runtime-service";
 import { NativeAutomationService } from "./services/automation-service";
+import { CodexObservationService } from "./services/codex-observation-service";
 import { BuiltinSessionSearchServer } from "../automation/engine/main/mcp-builtin-server";
 import type { McpBuiltinRuntime } from "../automation/engine/main/mcp-builtin-server";
 import { createLocalTextFilePreviewUnderRoots } from "../automation/engine/main/platform/local-file-preview";
@@ -313,6 +317,8 @@ let automationService: NativeAutomationService | null = null;
 let disposeAutomationIpc: (() => void) | null = null;
 let disposeTeamChatIpc: (() => void) | null = null;
 let disposeOpenVikingMemoryIpc: (() => void) | null = null;
+let disposeCodexObservationIpc: (() => void) | null = null;
+let codexObservationService: CodexObservationService | null = null;
 let openVikingRuntimeService: OpenVikingRuntimeService | null = null;
 let openVikingControlService: OpenVikingControlService | null = null;
 let openVikingHookManifestService: OpenVikingHookManifestService | null = null;
@@ -490,6 +496,18 @@ async function pickAutomationDirectory(defaultPath?: string): Promise<string | u
     ? await dialog.showOpenDialog(mainWindow, options)
     : await dialog.showOpenDialog(options);
   return result.canceled ? undefined : result.filePaths[0];
+}
+
+async function pickCodexObservationDirectory(): Promise<string | null> {
+  const options: Electron.OpenDialogOptions = {
+    title: "Choose Codex observation directory",
+    defaultPath: app.getPath("home"),
+    properties: ["openDirectory", "createDirectory"],
+  };
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options);
+  return result.canceled ? null : result.filePaths[0] ?? null;
 }
 
 function createQuotaService(): QuotaService {
@@ -2142,6 +2160,9 @@ function registerIpc(): void {
   if (!openVikingControlService) {
     throw new Error("OpenViking memory must be initialized before IPC registration.");
   }
+  if (!codexObservationService) {
+    throw new Error("Codex observation service must be initialized before IPC registration.");
+  }
   disposeAutomationIpc = registerAutomationIpc({
     ipc: ipcMain,
     service: automationService,
@@ -2166,6 +2187,11 @@ function registerIpc(): void {
     send: (channel, payload) => mainWindow?.webContents.send(channel, payload),
     ensureReady: () => automationService!.requireReady(),
   });
+  disposeCodexObservationIpc = registerCodexObservationIpc(
+    ipcMain,
+    codexObservationService,
+    pickCodexObservationDirectory,
+  );
   ipcMain.handle("markdown:open-external", (_event, value: unknown) => {
     const url = normalizeExternalLink(value);
     if (!url) throw new Error("Only HTTP, HTTPS, and mailto links can be opened externally.");
@@ -2578,6 +2604,13 @@ app.whenReady().then(async () => {
     migrations: POSTGRES_MIGRATIONS,
   });
   await postgresDatabase.initialize();
+  codexObservationService = new CodexObservationService({
+    repository: new PostgresCodexObservationRepository(postgresDatabase),
+    userDataPath: app.getPath("userData"),
+    homePath: app.getPath("home"),
+    publish: (update) => mainWindow?.webContents.send(CODEX_OBSERVATION_EVENTS.changed, update),
+  });
+  await codexObservationService.initialize();
   store = new SessionStore(
     postgresDatabase,
     Promise.resolve(),
@@ -2644,6 +2677,8 @@ app.whenReady().then(async () => {
   void initialIndexSettled.then(() => appUpdateService.scheduleInitialCheck());
 }).catch(async (error) => {
   console.error(`Failed to start AgentRecall: ${error instanceof Error ? error.message : String(error)}`);
+  await codexObservationService?.shutdown().catch(() => undefined);
+  codexObservationService = null;
   await postgresDatabase?.close().catch(() => undefined);
   await postgresRuntime?.stop().catch(() => undefined);
   postgresDatabase = null;
@@ -2675,10 +2710,13 @@ app.on("before-quit", (event) => {
   disposeTeamChatIpc = null;
   disposeOpenVikingMemoryIpc?.();
   disposeOpenVikingMemoryIpc = null;
+  disposeCodexObservationIpc?.();
+  disposeCodexObservationIpc = null;
   globalShortcut.unregisterAll();
   void Promise.allSettled([
     appUpdateService.clearRunningProcess(),
     automationService?.shutdown() ?? Promise.resolve(),
+    codexObservationService?.shutdown() ?? Promise.resolve(),
     providerService.stopCodexChatProxy(),
     openVikingHookManifestService?.clear() ?? Promise.resolve(),
     openVikingRuntimeService?.stop() ?? Promise.resolve(),
@@ -2687,6 +2725,7 @@ app.on("before-quit", (event) => {
       console.error(`Failed to close AgentRecall data store: ${error instanceof Error ? error.message : String(error)}`);
     });
     postgresDatabase = null;
+    codexObservationService = null;
     await postgresRuntime?.stop().catch((error) => {
       console.error(`Failed to stop AgentRecall PostgreSQL: ${error instanceof Error ? error.message : String(error)}`);
     });
