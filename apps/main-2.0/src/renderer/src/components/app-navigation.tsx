@@ -1,5 +1,6 @@
 import type { ReactElement } from "react";
 import {
+  Activity,
   Beaker,
   BrainCircuit,
   Cpu,
@@ -21,6 +22,7 @@ export type AppPage =
   | "sessions"
   | "team-chat"
   | "workflows"
+  | "observe"
   | "evaluation"
   | "runtimes"
   | "mcp"
@@ -70,6 +72,9 @@ export function AppNavigation({
         </NavigationItem>
         <NavigationItem page="workflows" activePage={activePage} onNavigate={onNavigate}>
           <Workflow size={18} /><span>Workflow</span>
+        </NavigationItem>
+        <NavigationItem page="observe" activePage={activePage} onNavigate={onNavigate}>
+          <Activity size={18} /><span>{l("Observe", "观测")}</span>
         </NavigationItem>
         <NavigationItem page="evaluation" activePage={activePage} onNavigate={onNavigate}>
           <Beaker size={18} /><span>Eval</span>

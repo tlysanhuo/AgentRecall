@@ -32,6 +32,7 @@ describe("CodexObservationJournal", () => {
       kind: "request",
       method: "turn/start",
       payload: {
+        line: JSON.stringify({ authorization: "Bearer line-secret" }),
         authorization: "Bearer secret",
         nested: { api_key: "key" },
         text: "x".repeat(40_000),
@@ -49,6 +50,7 @@ describe("CodexObservationJournal", () => {
     const page = await journal.readEvents({ stream: "rpc", afterSeq: 0, limit: 20 });
     const payload = await journal.readPayload(page.events[0]!);
     expect(payload).not.toContain("Bearer secret");
+    expect(payload).not.toContain("line-secret");
     expect(payload).not.toContain("\"key\"");
     expect(payload).toContain("[REDACTED]");
     expect(page.events[0]?.payloadRef).toMatch(/^[a-f0-9]{64}$/u);

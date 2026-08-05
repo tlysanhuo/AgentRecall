@@ -117,6 +117,9 @@ const TeamChatPage = lazy(() =>
   import("./features/team-chat/team-chat-page").then((module) => ({ default: module.TeamChatPage })));
 const EvaluationFeaturePage = lazy(() =>
   import("./features/eval/eval-page").then((module) => ({ default: module.EvalPage })));
+const CodexObservationPage = lazy(() =>
+  import("./features/codex-observation/codex-observation-page")
+    .then((module) => ({ default: module.CodexObservationPage })));
 const RuntimeFeaturePage = lazy(() =>
   import("./features/automation/runtime-feature-page").then((module) => ({ default: module.RuntimeFeaturePage })));
 const McpFeaturePage = lazy(() =>
@@ -1774,6 +1777,8 @@ export function App(): ReactElement {
             ) : null}
 
             {activePage === "workflows" ? <WorkflowFeaturePage language={language} /> : null}
+
+            {activePage === "observe" ? <CodexObservationPage language={language} /> : null}
 
             {activePage === "team-chat" ? (
               <TeamChatPage language={language} preferredRoomId={preferredTeamChatRoomId} />

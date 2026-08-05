@@ -114,6 +114,13 @@ function normalizePayload(
     if (SENSITIVE_KEY.test(key)) {
       normalized[key] = "[REDACTED]";
       state.redacted = true;
+    } else if (key === "line" && typeof child === "string") {
+      try {
+        const parsed = JSON.parse(child) as unknown;
+        normalized[key] = JSON.stringify(normalizePayload(parsed, seen, state));
+      } catch {
+        normalized[key] = child;
+      }
     } else {
       normalized[key] = normalizePayload(child, seen, state);
     }
