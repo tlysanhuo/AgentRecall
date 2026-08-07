@@ -111,6 +111,8 @@ interface RuntimeServiceOptions {
   healthProbe?: (baseUrl: string, rootApiKey: string) => Promise<boolean>;
   isProcessAlive?: (pid: number) => boolean;
   killProcess?: (pid: number) => void;
+  forceKillProcess?: (pid: number) => void;
+  stopTimeoutMs?: number;
 }
 
 interface PersistedRuntimeState {
@@ -134,6 +136,8 @@ export class OpenVikingRuntimeService {
   private readonly healthProbe: NonNullable<RuntimeServiceOptions["healthProbe"]>;
   private readonly isProcessAlive: NonNullable<RuntimeServiceOptions["isProcessAlive"]>;
   private readonly killProcess: NonNullable<RuntimeServiceOptions["killProcess"]>;
+  private readonly forceKillProcess: NonNullable<RuntimeServiceOptions["forceKillProcess"]>;
+  private readonly stopTimeoutMs: number;
   private child: RuntimeChild | null = null;
   private transientStatus: OpenVikingRuntimeStatus | null = null;
   private readonly runtimeEvents: OpenVikingRuntimeEvent[] = [];
@@ -154,6 +158,8 @@ export class OpenVikingRuntimeService {
     this.healthProbe = options.healthProbe ?? probeOwnedServer;
     this.isProcessAlive = options.isProcessAlive ?? processIsAlive;
     this.killProcess = options.killProcess ?? ((pid) => process.kill(pid, "SIGTERM"));
+    this.forceKillProcess = options.forceKillProcess ?? ((pid) => process.kill(pid, "SIGKILL"));
+    this.stopTimeoutMs = options.stopTimeoutMs ?? 15_000;
   }
 
   async getStatus(): Promise<OpenVikingRuntimeStatus> {
@@ -460,8 +466,20 @@ export class OpenVikingRuntimeService {
       await stopRuntimeChild(child);
       this.child = null;
     } else if (state && await this.isPersistedRuntimeHealthy(state)) {
-      this.killProcess(state.pid);
-      await waitForProcessExit(state.pid, this.isProcessAlive);
+      const terminated = await terminateRuntimeProcess({
+        pid: state.pid,
+        kill: this.killProcess,
+        forceKill: this.forceKillProcess,
+        isProcessAlive: this.isProcessAlive,
+        timeoutMs: this.stopTimeoutMs,
+      });
+      if (!terminated) {
+        this.recordRuntimeEvent(
+          "warning",
+          "stop",
+          `OpenViking process ${state.pid} did not exit after forced termination.`,
+        );
+      }
     }
     await rm(this.runtimeStatePath(), { force: true });
     this.transientStatus = null;
@@ -686,14 +704,31 @@ async function stopRuntimeChild(child: RuntimeChild): Promise<void> {
   });
 }
 
+const FORCE_KILL_EXIT_WAIT_MS = 5_000;
+
+async function terminateRuntimeProcess(options: {
+  pid: number;
+  kill: (pid: number) => void;
+  forceKill: (pid: number) => void;
+  isProcessAlive: (pid: number) => boolean;
+  timeoutMs: number;
+}): Promise<boolean> {
+  options.kill(options.pid);
+  if (await waitForProcessExit(options.pid, options.isProcessAlive, options.timeoutMs)) return true;
+  options.forceKill(options.pid);
+  return waitForProcessExit(options.pid, options.isProcessAlive, FORCE_KILL_EXIT_WAIT_MS);
+}
+
 async function waitForProcessExit(
   pid: number,
   isProcessAlive: (pid: number) => boolean,
-): Promise<void> {
-  const deadline = Date.now() + 15_000;
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
   while (isProcessAlive(pid) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
+  return !isProcessAlive(pid);
 }
 
 async function waitForHealthyServer(baseUrl: string, rootApiKey: string): Promise<void> {
