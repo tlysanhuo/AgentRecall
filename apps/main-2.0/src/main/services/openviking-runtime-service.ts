@@ -429,7 +429,7 @@ export class OpenVikingRuntimeService {
       this.recordRuntimeEvent("info", "ready", `OpenViking is ready on port ${port}.`);
       return this.getStatus();
     } catch (error) {
-      if (child.exitCode === null) child.kill();
+      await stopRuntimeChild(child, this.stopTimeoutMs);
       await rm(this.runtimeStatePath(), { force: true });
       this.child = null;
       this.transientStatus = null;
@@ -463,7 +463,7 @@ export class OpenVikingRuntimeService {
     const wasRunning = child?.exitCode === null || Boolean(state);
     if (wasRunning) this.recordRuntimeEvent("info", "stop", "Stopping OpenViking.");
     if (child?.exitCode === null) {
-      await stopRuntimeChild(child);
+      await stopRuntimeChild(child, this.stopTimeoutMs);
       this.child = null;
     } else if (state && await this.isPersistedRuntimeHealthy(state)) {
       const terminated = await terminateRuntimeProcess({
@@ -683,22 +683,26 @@ async function allocateLoopbackPort(): Promise<number> {
   });
 }
 
-async function stopRuntimeChild(child: RuntimeChild): Promise<void> {
+async function stopRuntimeChild(child: RuntimeChild, timeoutMs: number): Promise<void> {
   if (child.exitCode !== null) return;
   await new Promise<void>((resolve) => {
     let settled = false;
+    let forceKillGraceTimer: ReturnType<typeof setTimeout> | undefined;
     const finish = () => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      if (forceKillGraceTimer) clearTimeout(forceKillGraceTimer);
       child.removeListener("exit", onExit);
       resolve();
     };
     const onExit = () => finish();
     const timeout = setTimeout(() => {
       child.kill("SIGKILL");
-      finish();
-    }, 15_000);
+      // SIGKILL is delivered but the exit event lands asynchronously; keep
+      // waiting so callers never observe a live process right after stop.
+      forceKillGraceTimer = setTimeout(finish, FORCE_KILL_EXIT_WAIT_MS);
+    }, timeoutMs);
     child.once("exit", onExit);
     child.kill("SIGTERM");
   });

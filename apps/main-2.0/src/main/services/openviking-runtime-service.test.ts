@@ -764,6 +764,30 @@ describe("OpenVikingRuntimeService", () => {
     ]));
   }, 10_000);
 
+  it("waits for the owned runtime child to exit after escalating to SIGKILL", async () => {
+    const root = await temporaryRoot();
+    const child = new FakeChild(false);
+    const signals: Array<string | undefined> = [];
+    child.kill = ((signal?: string) => {
+      signals.push(signal);
+      if (signal === "SIGKILL") {
+        setTimeout(() => child.finishExit(), 30);
+      }
+      return true;
+    }) as FakeChild["kill"];
+    const { service } = runtimeHarness(root, { child, stopTimeoutMs: 100 });
+    await service.install(manifest());
+    await service.start({
+      embedding: { dense: { provider: "local", model: "model", dimension: 512 } },
+      vlm: { provider: "openai-codex", model: "gpt-5.4" },
+    });
+
+    await service.stop();
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(child.exitCode).toBe(0);
+    await expect(service.getStatus()).resolves.toMatchObject({ state: "stopped" });
+  });
+
   it.runIf(process.platform !== "win32")(
     "treats a zombie persisted process as stopped",
     async () => {
