@@ -3,13 +3,11 @@ import type {
   TaskRun,
   WorkflowDraftState,
   WorkflowNodeConversation,
-  WorkflowSidebarItem,
   WorkflowStoreState,
 } from "../../automation/contracts";
 
 export const AUTOMATION_CHANNELS = {
   health: "automation:health",
-  workflowSidebar: "automation:workflow:sidebar",
   snapshot: "automation:snapshot",
   snapshotChanged: "automation:snapshot-changed",
   change: "automation:change",
@@ -60,43 +58,6 @@ export const AUTOMATION_CHANNELS = {
   workflowRunStream: "automation:workflow:run:stream",
   workflowNodeRetry: "automation:workflow:node:retry",
   workflowApprovalResolve: "automation:workflow:approval:resolve",
-  workflowDraftCreate: "automation:workflow:draft-create",
-  workflowDraftPatch: "automation:workflow:draft-patch",
-  workflowUpdate: "automation:workflow:update",
-  workflowDraftReset: "automation:workflow:draft-reset",
-  workflowDraftSend: "automation:workflow:draft-send",
-  workflowDraftAbandon: "automation:workflow:draft-abandon",
-  workflowSelect: "automation:workflow:select",
-  workflowRename: "automation:workflow:rename",
-  workflowDelete: "automation:workflow:delete",
-  workflowCloneOfficial: "automation:workflow:clone-official",
-  workflowImportBegin: "automation:workflow:import-begin",
-  workflowImportConfirm: "automation:workflow:import-confirm",
-  workflowImportCancel: "automation:workflow:import-cancel",
-  workflowExport: "automation:workflow:export",
-  workflowConfirm: "automation:workflow:confirm",
-  workflowReview: "automation:workflow:review",
-  workflowReviewApplyToManager: "automation:workflow:review-apply-to-manager",
-  workflowReviewInterrupt: "automation:workflow:review-interrupt",
-  workflowRun: "automation:workflow:run",
-  workflowPauseNode: "automation:workflow:pause-node",
-  workflowReviseRun: "automation:workflow:revise-run",
-  workflowStopRun: "automation:workflow:stop-run",
-  workflowResolveIntervention: "automation:workflow:resolve-intervention",
-  workflowResolveRecovery: "automation:workflow:resolve-recovery",
-  workflowRefreshRecovery: "automation:workflow:refresh-recovery",
-  workflowResolveConflict: "automation:workflow:resolve-conflict",
-  workflowResolveUnknownOperation: "automation:workflow:resolve-unknown-operation",
-  workflowCleanupRunMaterials: "automation:workflow:cleanup-run-materials",
-  workflowSendNodeMessage: "automation:workflow:send-node-message",
-  workflowCompleteNodeConversation: "automation:workflow:complete-node-conversation",
-  workflowRejectNodeCompletion: "automation:workflow:reject-node-completion",
-  workflowInterruptNodeConversation: "automation:workflow:interrupt-node-conversation",
-  workflowStartNode: "automation:workflow:start-node",
-  workflowSubmitScriptInput: "automation:workflow:submit-script-input",
-  workflowOutputsList: "automation:workflow:outputs-list",
-  workflowOutputRead: "automation:workflow:output-read",
-  workflowOutputReveal: "automation:workflow:output-reveal",
   approvalResolve: "automation:approval:resolve",
 } as const;
 
@@ -138,9 +99,4 @@ export interface AutomationChange {
 export interface AutomationHealth {
   state: "idle" | "initializing" | "ready" | "error" | "stopped";
   error?: string;
-}
-
-export interface WorkflowSidebarSnapshot {
-  activeWorkflowId?: string;
-  workflows: WorkflowSidebarItem[];
 }

@@ -1,9 +1,9 @@
 import type {
-  WorkflowDraftState,
-  WorkflowRunState,
+  WorkflowDefinition,
+  WorkflowRun,
+  WorkflowRunStatus,
   WorkflowStatus,
 } from "../../../../automation/contracts";
-import type { WorkflowSidebarItem } from "../../../../automation/engine/shared/workflow/draft";
 
 export interface WorkbenchWorkflowItem {
   workflow: {
@@ -25,24 +25,24 @@ const STATUS_PRIORITY: Record<WorkflowStatus, number> = {
 };
 
 export function selectWorkbenchWorkflows(
-  workflows: WorkflowDraftState[],
-  runs: WorkflowRunState[],
+  workflows: WorkflowDefinition[],
+  runs: WorkflowRun[],
   limit = 5,
 ): WorkbenchWorkflowItem[] {
   return workflows
     .map((workflow) => {
       const workflowRuns = runs
-        .filter((run) => run.workflowId === workflow.workflowId)
+        .filter((run) => run.workflowId === workflow.id)
         .sort((left, right) => right.startedAt - left.startedAt);
-      const activeRun = workflowRuns.find((run) => run.status === "waiting_for_user" || run.status === "running");
+      const activeRun = workflowRuns.find((run) => run.status === "waiting" || run.status === "running");
       const latestRun = activeRun ?? workflowRuns[0];
       return {
         workflow: {
-          workflowId: workflow.workflowId,
-          title: workflow.title,
+          workflowId: workflow.id,
+          title: workflow.name,
         },
-        nodeCount: workflow.definition.nodes.length,
-        status: activeRun?.status ?? workflow.status,
+        nodeCount: workflow.nodes.length,
+        status: activeRun ? workbenchStatus(activeRun.status) : "draft",
         updatedAt: Math.max(workflow.updatedAt, latestRun?.finishedAt ?? latestRun?.startedAt ?? 0),
       };
     })
@@ -53,23 +53,8 @@ export function selectWorkbenchWorkflows(
     .slice(0, Math.max(0, limit));
 }
 
-export function selectWorkbenchWorkflowSummaries(
-  workflows: WorkflowSidebarItem[],
-  limit = 5,
-): WorkbenchWorkflowItem[] {
-  return workflows
-    .map((workflow) => ({
-      workflow: {
-        workflowId: workflow.workflowId,
-        title: workflow.title,
-      },
-      nodeCount: workflow.nodeCount,
-      status: workflow.status,
-      updatedAt: workflow.updatedAt,
-    }))
-    .sort((left, right) => {
-      const priority = STATUS_PRIORITY[left.status] - STATUS_PRIORITY[right.status];
-      return priority || right.updatedAt - left.updatedAt;
-    })
-    .slice(0, Math.max(0, limit));
+function workbenchStatus(status: WorkflowRunStatus): WorkflowStatus {
+  if (status === "waiting") return "waiting_for_user";
+  if (status === "paused" || status === "cancelled") return "stopped";
+  return status;
 }

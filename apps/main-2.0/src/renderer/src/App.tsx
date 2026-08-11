@@ -15,7 +15,7 @@ import type { IndexStatus } from "../../core/indexer";
 import type { AppUpdateProgress, AppUpdateStatus } from "../../core/app-update-types";
 import type { AppSettings, AppSettingsUpdate } from "../../core/platform";
 import type { MigrationTargetSettings } from "../../core/migration-targets";
-import type { McpServerDefinition } from "../../automation/contracts";
+import type { McpServerDefinition, WorkflowCoreSnapshot } from "../../automation/contracts";
 import type { InstalledSkill } from "../../core/skill-manager";
 import type { OpenVikingMemorySnapshot } from "../../core/openviking-memory";
 import type { RemoteHealthReport } from "../../core/remote-health";
@@ -90,7 +90,7 @@ import { WslEnvironmentDialog } from "./features/settings/wsl-environment-dialog
 import { WorkbenchPage } from "./features/workbench/workbench-page";
 import { useWorkbenchOverview } from "./features/workbench/use-workbench-overview";
 import { useAutomation } from "./features/automation/automation-provider";
-import { selectWorkbenchWorkflows, selectWorkbenchWorkflowSummaries } from "./features/automation/workbench-workflows";
+import { selectWorkbenchWorkflows } from "./features/automation/workbench-workflows";
 import {
   canMigrateSession,
   isBranchTag,
@@ -197,16 +197,13 @@ export function App(): ReactElement {
       return false;
     }
   }, [activePage]);
+  const [workbenchWorkflowCore, setWorkbenchWorkflowCore] = useState<WorkflowCoreSnapshot | null>(null);
+  const [workflowInitialRequest, setWorkflowInitialRequest] = useState<{ workflowId?: string; createNew?: boolean }>();
   const workbenchWorkflows = useMemo(
-    () => automation.detailsLoaded
-      ? selectWorkbenchWorkflows(automation.snapshot.workflowStore.workflows, automation.snapshot.workflowStore.runs)
-      : selectWorkbenchWorkflowSummaries(automation.workflowSidebar.workflows),
-    [
-      automation.detailsLoaded,
-      automation.snapshot.workflowStore.runs,
-      automation.snapshot.workflowStore.workflows,
-      automation.workflowSidebar.workflows,
-    ],
+    () => workbenchWorkflowCore
+      ? selectWorkbenchWorkflows(workbenchWorkflowCore.definitions, workbenchWorkflowCore.runs)
+      : [],
+    [workbenchWorkflowCore],
   );
   const [workbenchMcpServers, setWorkbenchMcpServers] = useState<McpServerDefinition[] | null>(null);
   const [workbenchChatRooms, setWorkbenchChatRooms] = useState<TeamChatRoomSummary[] | null>(null);
@@ -223,7 +220,16 @@ export function App(): ReactElement {
     setWorkbenchMemorySnapshot(null);
     setWorkbenchMemoryLoading(true);
     setWorkbenchSkills(null);
+    setWorkbenchWorkflowCore(null);
     const tasks: Array<() => Promise<void>> = [
+      async () => {
+        try {
+          const snapshot = await automation.api.getWorkflowCore();
+          if (active) setWorkbenchWorkflowCore(snapshot);
+        } catch {
+          if (active) setWorkbenchWorkflowCore({ definitions: [], runs: [] });
+        }
+      },
       async () => {
         try {
           const servers = await automation.api.listMcpServers();
@@ -1656,21 +1662,20 @@ export function App(): ReactElement {
                 setActivePage("sessions");
               }}
               workflows={workbenchWorkflows}
-              workflowsLoading={automation.detailsLoaded ? automation.loading : automation.workflowSidebarLoading}
+              workflowsLoading={workbenchWorkflowCore === null}
               workflowsError={automation.error}
               onOpenWorkflow={(workflowId) => {
-                void automation.api.selectWorkflow(workflowId).then((next) => {
-                  automation.setSnapshot(next);
-                  setActivePage("workflows");
-                }).catch((error) => setActionStatus({ kind: "error", message: error instanceof Error ? error.message : String(error) }));
+                setWorkflowInitialRequest({ workflowId });
+                void navigateToPage("workflows");
               }}
               onNewWorkflow={() => {
-                void automation.api.createWorkflowDraft().then((next) => {
-                  automation.setSnapshot(next);
-                  setActivePage("workflows");
-                }).catch((error) => setActionStatus({ kind: "error", message: error instanceof Error ? error.message : String(error) }));
+                setWorkflowInitialRequest({ createNew: true });
+                void navigateToPage("workflows");
               }}
-              onShowWorkflows={() => void navigateToPage("workflows")}
+              onShowWorkflows={() => {
+                setWorkflowInitialRequest(undefined);
+                void navigateToPage("workflows");
+              }}
               runtimes={automation.detailsLoaded ? automation.snapshot.runtimes : []}
               runtimeChannels={automation.detailsLoaded ? automation.snapshot.channels : []}
               runtimeOverviewAvailable={automation.detailsLoaded}
@@ -1832,6 +1837,8 @@ export function App(): ReactElement {
               language={language}
               globalReviewEnabled={Boolean(appSettings?.workflowGlobalReviewEnabled)}
               runtimeReviewEnabled={Boolean(appSettings?.workflowRuntimeReviewEnabled)}
+              initialRequest={workflowInitialRequest}
+              onInitialRequestConsumed={() => setWorkflowInitialRequest(undefined)}
             /> : null}
 
             {activePage === "team-chat" ? (

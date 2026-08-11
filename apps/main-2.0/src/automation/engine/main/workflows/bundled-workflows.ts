@@ -9,13 +9,6 @@ export interface BundledWorkflowDefinition {
   definition: WorkflowV2Definition;
 }
 
-export interface BundledWorkflowSummary {
-  workflowId: string;
-  title: string;
-  objective: string;
-  nodeCount: number;
-}
-
 interface ParsedBundledWorkflowManifest extends BundledWorkflowDefinition {
   dir: string;
   templateAsset?: string;
@@ -59,15 +52,6 @@ export async function loadBundledWorkflows(rootDir: string): Promise<BundledWork
     title,
     objective,
     definition,
-  }));
-}
-
-export async function loadBundledWorkflowSummaries(rootDir: string): Promise<BundledWorkflowSummary[]> {
-  return (await loadBundledWorkflowManifests(rootDir)).map((manifest) => ({
-    workflowId: manifest.workflowId,
-    title: manifest.title,
-    objective: manifest.objective,
-    nodeCount: manifest.definition.nodes.length,
   }));
 }
 

@@ -14,7 +14,7 @@ import {
 import { DEFAULT_SNAPSHOT } from "../../../../automation/engine/renderer/src/app/app-state";
 import type { AppSnapshot } from "../../../../automation/contracts";
 import type { AutomationApi } from "../../../../preload/automation";
-import type { AutomationHealth, WorkflowSidebarSnapshot } from "../../../../shared/ipc/automation";
+import type { AutomationHealth } from "../../../../shared/ipc/automation";
 import { AutomationStore } from "./automation-store";
 
 interface AutomationContextValue {
@@ -22,8 +22,6 @@ interface AutomationContextValue {
   snapshot: AppSnapshot;
   setSnapshot: Dispatch<SetStateAction<AppSnapshot>>;
   health: AutomationHealth;
-  workflowSidebar: WorkflowSidebarSnapshot;
-  workflowSidebarLoading: boolean;
   detailsLoaded: boolean;
   loading: boolean;
   error: string | null;
@@ -49,8 +47,6 @@ export function AutomationProvider({ children }: { children: ReactNode }) {
     setSnapshotState(next);
   }, [store]);
   const [health, setHealth] = useState<AutomationHealth>({ state: "initializing" });
-  const [workflowSidebar, setWorkflowSidebar] = useState<WorkflowSidebarSnapshot>({ workflows: [] });
-  const [workflowSidebarLoading, setWorkflowSidebarLoading] = useState(true);
   const [detailsLoaded, setDetailsLoaded] = useState(false);
   const detailsLoadedRef = useRef(false);
   const detailsRequestRef = useRef<Promise<AppSnapshot> | undefined>(undefined);
@@ -125,16 +121,6 @@ export function AutomationProvider({ children }: { children: ReactNode }) {
     void api.getHealth().then((next) => {
       if (active) setHealth(next);
     }).catch(() => undefined);
-    void (async () => {
-      try {
-        const next = await api.getWorkflowSidebar();
-        if (active) setWorkflowSidebar(next);
-      } catch {
-        if (active) void ensureDetailsLoaded().catch(() => undefined);
-      } finally {
-        if (active) setWorkflowSidebarLoading(false);
-      }
-    })();
     return () => {
       active = false;
       unsubscribe();
@@ -147,15 +133,13 @@ export function AutomationProvider({ children }: { children: ReactNode }) {
     snapshot,
     setSnapshot,
     health,
-    workflowSidebar,
-    workflowSidebarLoading,
     detailsLoaded,
     loading,
     error,
     ensureDetailsLoaded,
     refresh,
     store,
-  }), [api, detailsLoaded, ensureDetailsLoaded, error, health, loading, refresh, snapshot, store, setSnapshot, workflowSidebar, workflowSidebarLoading]);
+  }), [api, detailsLoaded, ensureDetailsLoaded, error, health, loading, refresh, snapshot, store, setSnapshot]);
 
   return <AutomationContext.Provider value={value}>{children}</AutomationContext.Provider>;
 }

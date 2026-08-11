@@ -16,7 +16,7 @@ import type {
 import { DEFAULT_MODEL_ID, FALLBACK_MODEL_OPTIONS, defaultChannelForAgent, defaultModelOption } from "../../../shared/models";
 import { runtimeDefinition, runtimeLabel } from "../../../shared/runtime-catalog";
 import type { AgentProviderPreset } from "../../../shared/provider-presets";
-import { truncateWorkflowContext } from "../pages/workflow/workflow-utils";
+import { truncateWorkflowContext } from "../../../shared/workflow-v2/runtime-utils";
 
 export const DEFAULT_SNAPSHOT: AppSnapshot = {
   detectedAt: 0,

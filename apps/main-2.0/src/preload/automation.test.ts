@@ -13,11 +13,11 @@ describe("createAutomationApi", () => {
 
     await api.saveModelChannels([]);
     await api.listMcpServers();
-    await api.createWorkflowDraft({ title: "Ship" });
+    await api.getWorkflowCore();
 
     expect(ipc.invoke).toHaveBeenNthCalledWith(1, AUTOMATION_CHANNELS.runtimeSaveChannels, []);
     expect(ipc.invoke).toHaveBeenNthCalledWith(2, AUTOMATION_CHANNELS.mcpList);
-    expect(ipc.invoke).toHaveBeenNthCalledWith(3, AUTOMATION_CHANNELS.workflowDraftCreate, { title: "Ship" });
+    expect(ipc.invoke).toHaveBeenNthCalledWith(3, AUTOMATION_CHANNELS.workflowCoreGet, undefined);
   });
 
   it("deletes one concrete Agent by its persisted id", async () => {
@@ -27,15 +27,6 @@ describe("createAutomationApi", () => {
     await api.deleteConfiguredAgent("agent-1");
 
     expect(ipc.invoke).toHaveBeenCalledWith(AUTOMATION_CHANNELS.runtimeDeleteAgent, "agent-1");
-  });
-
-  it("loads the lightweight Workflow sidebar through its own channel", async () => {
-    const ipc = { invoke: vi.fn(async () => ({ workflows: [] })), on: vi.fn(), removeListener: vi.fn() };
-    const api = createAutomationApi(ipc as never);
-
-    await api.getWorkflowSidebar();
-
-    expect(ipc.invoke).toHaveBeenCalledWith(AUTOMATION_CHANNELS.workflowSidebar);
   });
 
   it("maps the structured Workflow API without legacy draft operations", async () => {
@@ -63,26 +54,6 @@ describe("createAutomationApi", () => {
       [AUTOMATION_CHANNELS.workflowApprovalResolve, { runId: "run", nodeId: "approval", outputs: { decision: "yes" } }],
       [AUTOMATION_CHANNELS.workflowRunCancel, { runId: "run" }],
       [AUTOMATION_CHANNELS.workflowDefinitionDelete, { workflowId: "workflow" }],
-    ]);
-  });
-
-  it("keeps portable Workflow file contents behind explicit IPC calls", async () => {
-    const ipc = { invoke: vi.fn(async () => ({ ok: true })), on: vi.fn(), removeListener: vi.fn() };
-    const api = createAutomationApi(ipc as never);
-    const request = { previewToken: "workflow_import_1", agentMappings: { missing: "agent-1" } };
-
-    await api.cloneOfficialWorkflow("official-1");
-    await api.beginWorkflowImport();
-    await api.confirmWorkflowImport(request);
-    await api.cancelWorkflowImport("workflow_import_2");
-    await api.exportWorkflow("personal-1");
-
-    expect(ipc.invoke.mock.calls).toEqual([
-      [AUTOMATION_CHANNELS.workflowCloneOfficial, "official-1"],
-      [AUTOMATION_CHANNELS.workflowImportBegin],
-      [AUTOMATION_CHANNELS.workflowImportConfirm, request],
-      [AUTOMATION_CHANNELS.workflowImportCancel, { previewToken: "workflow_import_2" }],
-      [AUTOMATION_CHANNELS.workflowExport, "personal-1"],
     ]);
   });
 

@@ -160,10 +160,7 @@ describe("PostgreSQL AgentHub persistence", () => {
     } as unknown as PersistedAppStateV5;
 
     await store.save(payload);
-    const sidebar = await store.loadWorkflowSidebar();
     const restored = await store.load() as Record<string, unknown>;
-
-    expect(sidebar).toEqual({ workflows: [] });
 
     expect(restored).toMatchObject({
       version: 5,

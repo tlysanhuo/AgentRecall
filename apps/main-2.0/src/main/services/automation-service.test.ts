@@ -124,12 +124,6 @@ function fixture(injectAgents = true, optionOverrides: Partial<AutomationService
         objective: "One",
         definition: { workflowId: "wf", graphVersion: 1, objective: "One", nodes: [], edges: [] },
       }]),
-      loadBundledWorkflowSummaries: vi.fn(async () => [{
-        workflowId: "wf",
-        title: "One",
-        objective: "One",
-        nodeCount: 0,
-      }]),
       startRouter: vi.fn(async () => {
         calls.push("router");
         return { host: "127.0.0.1", port: 1, baseUrl: "http://127.0.0.1:1", stop: async () => { calls.push("router-stop"); } };
@@ -176,20 +170,6 @@ describe("NativeAutomationService", () => {
     expect((await service.mcp.list()).map((server) => server.id)).toEqual([
       "agent-recall-skills",
     ]);
-  });
-
-  it("loads Workflow sidebar summaries without preparing full automation state", async () => {
-    const { service, hub, database } = fixture();
-
-    const sidebar = await service.workflowSidebar();
-
-    expect(sidebar).toMatchObject({
-      activeWorkflowId: "wf",
-      workflows: [{ workflowId: "wf", sourceType: "official", nodeCount: 0 }],
-    });
-    expect(hub.loadModelChannels).not.toHaveBeenCalled();
-    expect(hub.loadPersistedState).not.toHaveBeenCalled();
-    expect(database.query).toHaveBeenCalledTimes(1);
   });
 
   it("prepares the persisted snapshot without starting execution infrastructure", async () => {

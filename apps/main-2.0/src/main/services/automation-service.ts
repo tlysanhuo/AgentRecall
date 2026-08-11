@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AppSnapshot, ConfiguredAgent, WorkflowSidebarItem } from "../../automation/contracts";
+import type { AppSnapshot, ConfiguredAgent } from "../../automation/contracts";
 import {
   AgentHub,
   configuredAgentReferenceError,
@@ -35,9 +35,7 @@ import { structuredBundledWorkflowDefinitions } from "../../automation/engine/sh
 import { PostgresWorkflowCoreRepository } from "../../automation/engine/main/hub/persisted/postgres-workflow-core-repository";
 import {
   loadBundledWorkflows,
-  loadBundledWorkflowSummaries,
   type BundledWorkflowDefinition,
-  type BundledWorkflowSummary,
 } from "../../automation/engine/main/workflows/bundled-workflows";
 import { workflowMcpToolDecision } from "../../automation/engine/shared/workflow-mcp-policy";
 import {
@@ -47,7 +45,6 @@ import {
   type AutomationEntityPatch,
   type WorkflowAutomationPatch,
   type WorkflowAutomationProjection,
-  type WorkflowSidebarSnapshot,
 } from "../../shared/ipc/automation";
 import { resolveAutomationPaths, type AutomationPaths } from "./automation-paths";
 import { EvaluationService } from "./evaluation-service";
@@ -55,10 +52,6 @@ import type { PostgresDatabase } from "../../core/postgres/database";
 import { TeamChatService } from "../team-chat/team-chat-service";
 import { PostgresTeamChatStore } from "../team-chat/postgres-team-chat-store";
 import { McpAutomationModule } from "./mcp-automation-module";
-import {
-  WorkflowPortableService,
-  type WorkflowPortableFileSelection,
-} from "./workflow-portable-service";
 import { parseWorkflowAgentOutputs, WorkflowCoreService } from "./workflow-core-service";
 
 export interface AutomationServiceOptions {
@@ -76,9 +69,6 @@ export interface AutomationServiceOptions {
     readRuntime(): McpBuiltinRuntime | undefined;
     writeRuntime(runtime: McpBuiltinRuntime): void;
   };
-  chooseWorkflowImportFile?: () => Promise<WorkflowPortableFileSelection | undefined>;
-  chooseWorkflowExportPath?: (defaultFileName: string) => Promise<string | undefined>;
-  writeWorkflowExportFile?: (filePath: string, content: string) => Promise<void>;
   confirmWorkflowScriptPermissions?: (input: {
     nodeTitle: string;
     permissions: WorkflowScriptPermission[];
@@ -93,7 +83,6 @@ interface AutomationServiceDependencies {
   teamChats?: TeamChatService;
   workflowCore?: WorkflowCoreService;
   loadBundledWorkflows?: (rootPath: string) => Promise<BundledWorkflowDefinition[]>;
-  loadBundledWorkflowSummaries?: (rootPath: string) => Promise<BundledWorkflowSummary[]>;
   startBridge?: typeof startMcpBridge;
   startRouter?: typeof startCodexChatRouter;
   setRouterBaseUrl?: typeof setCodexChatRouterBaseUrl;
@@ -200,58 +189,19 @@ export type RuntimeAutomationModule = Pick<
   | "snapshot"
 >;
 
-export type WorkflowAutomationModule = Pick<
-  AgentHub,
-  | "createWorkflowDraft"
-  | "patchWorkflowDraft"
-  | "updateWorkflow"
-  | "resetWorkflowDraftSession"
-  | "sendWorkflowDraftReply"
-  | "abandonWorkflowDraftReply"
-  | "selectWorkflow"
-  | "renameWorkflow"
-  | "deleteWorkflow"
-  | "confirmWorkflow"
-  | "reviewWorkflow"
-  | "applyWorkflowReviewToManager"
-  | "interruptWorkflowReview"
-  | "runWorkflow"
-  | "pauseWorkflowNode"
-  | "reviseWorkflowV2Run"
-  | "stopWorkflowRun"
-  | "resolveWorkflowV2Intervention"
-  | "resolveWorkflowV2Recovery"
-  | "refreshWorkflowV2Recovery"
-  | "resolveWorkflowV2Conflict"
-  | "resolveWorkflowV2UnknownOperation"
-  | "cleanupWorkflowV2RunMaterials"
-  | "sendWorkflowNodeMessage"
-  | "completeWorkflowNodeConversation"
-  | "rejectWorkflowNodeCompletion"
-  | "interruptWorkflowNodeConversation"
-  | "startWorkflowNode"
-  | "submitWorkflowScriptInput"
-  | "listWorkflowOutputs"
-  | "allowedFileRoots"
-  | "snapshot"
->;
-
 export class NativeAutomationService {
   readonly paths: AutomationPaths;
   readonly runtime: RuntimeAutomationModule;
-  readonly workflows: WorkflowAutomationModule;
   readonly workflowCore: WorkflowCoreService;
   readonly mcp: McpAutomationModule;
   readonly evaluations: EvaluationService;
   readonly teamChat: TeamChatService;
-  readonly portableWorkflows: WorkflowPortableService;
   private readonly hubInstance: AgentHub;
   private readonly appStore: PostgresAppStore;
   private readonly configuredAgentExecutor: ConfiguredAgentExecutionService;
   private readonly registryInstance: McpRegistryStore;
   private readonly agentsInstance: McpAgentManagementService;
   private readonly loadWorkflows: (rootPath: string) => Promise<BundledWorkflowDefinition[]>;
-  private readonly loadWorkflowSummaries: (rootPath: string) => Promise<BundledWorkflowSummary[]>;
   private readonly startBridgeService: typeof startMcpBridge;
   private readonly startRouterService: typeof startCodexChatRouter;
   private readonly setRouterBaseUrl: typeof setCodexChatRouterBaseUrl;
@@ -265,9 +215,6 @@ export class NativeAutomationService {
   private router: CodexChatRouterServer | undefined;
   private preparePromise: Promise<void> | undefined;
   private bundledWorkflowsPromise: Promise<BundledWorkflowDefinition[]> | undefined;
-  private bundledWorkflowSummariesPromise: Promise<BundledWorkflowSummary[]> | undefined;
-  private workflowSidebarPromise: Promise<WorkflowSidebarSnapshot> | undefined;
-  private readonly officialSidebarCreatedAt = Date.now();
   private initializePromise: Promise<void> | undefined;
   private shutdownPromise: Promise<void> | undefined;
   private shutdownRequested = false;
@@ -282,7 +229,6 @@ export class NativeAutomationService {
     this.appStore = new PostgresAppStore(options.database, this.paths.fileStoragePath);
     this.registryInstance = dependencies.registry ?? new McpRegistryStore(options.database);
     this.loadWorkflows = dependencies.loadBundledWorkflows ?? loadBundledWorkflows;
-    this.loadWorkflowSummaries = dependencies.loadBundledWorkflowSummaries ?? loadBundledWorkflowSummaries;
     this.startBridgeService = dependencies.startBridge ?? startMcpBridge;
     this.startRouterService = dependencies.startRouter ?? startCodexChatRouter;
     this.setRouterBaseUrl = dependencies.setRouterBaseUrl ?? setCodexChatRouterBaseUrl;
@@ -349,19 +295,6 @@ export class NativeAutomationService {
         .find((agent) => agent.id === agentId)?.runtimeAgentId,
     });
     this.runtime = this.hubInstance;
-    this.workflows = this.hubInstance;
-    this.portableWorkflows = new WorkflowPortableService({
-      hub: this.hubInstance,
-      chooseImportFile: options.chooseWorkflowImportFile ?? (async () => {
-        throw new Error("Workflow import file picker is unavailable.");
-      }),
-      chooseExportPath: options.chooseWorkflowExportPath ?? (async () => {
-        throw new Error("Workflow export file picker is unavailable.");
-      }),
-      writeExportFile: options.writeWorkflowExportFile ?? (async () => {
-        throw new Error("Workflow export writer is unavailable.");
-      }),
-    });
     const workflowBuiltin = options.workflowMcp
       ? new BuiltinWorkflowMcpServer({
           isEnabled: () => options.workflowMcp!.isEnabled(),
@@ -454,62 +387,12 @@ export class NativeAutomationService {
     this.hubInstance.ensureBundledWorkflows(await this.bundledWorkflows());
   }
 
-  workflowSidebar(): Promise<WorkflowSidebarSnapshot> {
-    if (this.shutdownRequested) {
-      return Promise.reject(new Error("AgentRecall automation has stopped."));
-    }
-    this.workflowSidebarPromise ??= this.loadWorkflowSidebar().catch((error) => {
-      this.workflowSidebarPromise = undefined;
-      throw error;
-    });
-    return this.workflowSidebarPromise;
-  }
-
-  private async loadWorkflowSidebar(): Promise<WorkflowSidebarSnapshot> {
-    const [persisted, bundled] = await Promise.all([
-      this.appStore.loadWorkflowSidebar(),
-      this.bundledWorkflowSummaries(),
-    ]);
-    const workflows = new Map(persisted.workflows.map((workflow) => [workflow.workflowId, workflow]));
-    for (const definition of bundled) {
-      const existing = workflows.get(definition.workflowId);
-      const official: WorkflowSidebarItem = {
-        workflowId: definition.workflowId,
-        sourceType: "official",
-        title: definition.title,
-        status: existing?.status ?? "draft",
-        revision: existing?.revision ?? 1,
-        objective: definition.objective,
-        nodeCount: definition.nodeCount,
-        createdAt: existing?.createdAt ?? this.officialSidebarCreatedAt,
-        updatedAt: existing?.updatedAt ?? this.officialSidebarCreatedAt,
-      };
-      workflows.set(official.workflowId, official);
-    }
-    const ordered = [...workflows.values()].sort((left, right) => right.createdAt - left.createdAt);
-    const activeWorkflowId = persisted.activeWorkflowId && workflows.has(persisted.activeWorkflowId)
-      ? persisted.activeWorkflowId
-      : bundled.find((workflow) => workflows.has(workflow.workflowId))?.workflowId ?? ordered[0]?.workflowId;
-    return {
-      ...(activeWorkflowId ? { activeWorkflowId } : {}),
-      workflows: ordered,
-    };
-  }
-
   private bundledWorkflows(): Promise<BundledWorkflowDefinition[]> {
     this.bundledWorkflowsPromise ??= this.loadWorkflows(this.options.bundledWorkflowsPath).catch((error) => {
       this.bundledWorkflowsPromise = undefined;
       throw error;
     });
     return this.bundledWorkflowsPromise;
-  }
-
-  private bundledWorkflowSummaries(): Promise<BundledWorkflowSummary[]> {
-    this.bundledWorkflowSummariesPromise ??= this.loadWorkflowSummaries(this.options.bundledWorkflowsPath).catch((error) => {
-      this.bundledWorkflowSummariesPromise = undefined;
-      throw error;
-    });
-    return this.bundledWorkflowSummariesPromise;
   }
 
   private async initializeInternal(): Promise<void> {

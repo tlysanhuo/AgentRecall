@@ -294,7 +294,17 @@ function RunInspector({ run, selectedNodeId, liveOutput, onRetry, onApprove }: {
   </div>;
 }
 
-export function WorkflowFeaturePage({ language }: { language: LanguageMode; globalReviewEnabled: boolean; runtimeReviewEnabled: boolean }): ReactElement {
+export function WorkflowFeaturePage({
+  language,
+  initialRequest,
+  onInitialRequestConsumed = () => undefined,
+}: {
+  language: LanguageMode;
+  globalReviewEnabled: boolean;
+  runtimeReviewEnabled: boolean;
+  initialRequest?: { workflowId?: string; createNew?: boolean };
+  onInitialRequestConsumed?: () => void;
+}): ReactElement {
   const api = useMemo(() => agentRecallAutomationService(), []);
   const automation = useAutomationStoreSnapshot();
   const agents = automation.configuredAgents.map((agent) => ({ id: agent.id, name: agent.name }));
@@ -321,7 +331,26 @@ export function WorkflowFeaturePage({ language }: { language: LanguageMode; glob
     if (next) setDraft(structuredClone(next));
   }, [api, selectedId]);
 
-  useEffect(() => { void load().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause))); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    void (async () => {
+      try {
+        if (!initialRequest?.createNew) {
+          await load(initialRequest?.workflowId);
+          return;
+        }
+        const snapshot = await api.getWorkflowCore();
+        const next = createWorkflowDefinition(agents[0]?.id ?? "");
+        setDefinitions([next, ...snapshot.definitions]);
+        setRuns(snapshot.runs);
+        setSelectedId(next.id);
+        setDraft(next);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        onInitialRequestConsumed();
+      }
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => api.onWorkflowRunStream((event) => {
     setRunStreams((current) => reduceWorkflowRunStream(current, event));
   }), [api]);

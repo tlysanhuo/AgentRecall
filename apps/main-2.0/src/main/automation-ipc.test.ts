@@ -24,9 +24,6 @@ function setup(pickDirectory?: (defaultPath?: string) => Promise<string | undefi
   const hub = {
     saveModelChannels: vi.fn(async (value) => ({ channels: value })),
     updateConfiguredAgents: vi.fn((value, _options?: { detectDeletedManagedAgents?: boolean }) => ({ configuredAgents: value })),
-    createWorkflowDraft: vi.fn((value) => ({ workflowDraft: value })),
-    sendWorkflowDraftReply: vi.fn(async (value) => ({ workflowDraft: value })),
-    applyWorkflowReviewToManager: vi.fn(async (value) => ({ workflowDraft: value })),
     setMcpServers: vi.fn(),
     listConfiguredAgents: vi.fn(() => [{
       id: "agent-1", name: "Agent", description: "", runtimeAgentId: "codex", channelId: "codex-openai",
@@ -73,7 +70,6 @@ function setup(pickDirectory?: (defaultPath?: string) => Promise<string | undefi
     requirePrepared: vi.fn(async () => undefined),
     requireReady: vi.fn(async () => undefined),
     health: vi.fn(() => ({ state: "ready" })),
-    workflowSidebar: vi.fn(async () => ({ workflows: [{ workflowId: "workflow-1" }] })),
     snapshot: vi.fn(() => ({ workDir: "/repo" })),
     subscribe: vi.fn(() => () => undefined),
     subscribeChanges: vi.fn(() => () => undefined),
@@ -84,7 +80,6 @@ function setup(pickDirectory?: (defaultPath?: string) => Promise<string | undefi
     runtime: hub,
     updateConfiguredAgents: vi.fn((value, options) => hub.updateConfiguredAgents(value, options)),
     deleteConfiguredAgent: vi.fn(async (agentId: string) => ({ configuredAgents: hub.listConfiguredAgents().filter((agent) => agent.id !== agentId) })),
-    workflows: hub,
     workflowCore: {
       snapshot: vi.fn(async () => ({ definitions: [], runs: [] })),
       saveDefinition: vi.fn(async (value) => value),
@@ -98,13 +93,6 @@ function setup(pickDirectory?: (defaultPath?: string) => Promise<string | undefi
     },
     mcp,
     evaluations,
-    portableWorkflows: {
-      cloneOfficialWorkflow: vi.fn(async (workflowId) => ({ workflowId })),
-      beginImport: vi.fn(async () => ({ previewToken: "workflow_import_1" })),
-      confirmImport: vi.fn(async (previewToken, mapping) => ({ previewToken, mapping })),
-      cancelImport: vi.fn(),
-      exportWorkflow: vi.fn(async () => ({ status: "exported" })),
-    },
     resolveRuntimeApproval: vi.fn(),
   } as unknown as NativeAutomationService;
   const dispose = registerAutomationIpc({ ipc: ipc as never, service, send, pickDirectory });
@@ -199,34 +187,12 @@ describe("registerAutomationIpc", () => {
     );
   });
 
-  it("validates portable Workflow identifiers and mapping payloads", async () => {
-    const { invoke, service } = setup();
-    const portable = service.portableWorkflows;
-
-    await expect(invoke(AUTOMATION_CHANNELS.workflowCloneOfficial, "official-1")).resolves.toEqual({ workflowId: "official-1" });
-    await expect(invoke(AUTOMATION_CHANNELS.workflowImportConfirm, { previewToken: "workflow_import_1", agentMappings: { missing: "agent-1" } })).resolves.toMatchObject({ previewToken: "workflow_import_1" });
-    expect(portable.confirmImport).toHaveBeenCalledWith("workflow_import_1", { previewToken: "workflow_import_1", agentMappings: { missing: "agent-1" } });
-    await expect(invoke(AUTOMATION_CHANNELS.workflowImportConfirm, { previewToken: "", definition: {} })).rejects.toThrow();
-  });
-
   it("loads the overview snapshot without starting the execution engine", async () => {
     const { invoke, service } = setup();
 
     await expect(invoke(AUTOMATION_CHANNELS.snapshot)).resolves.toEqual({ workDir: "/repo" });
 
     expect(service.requirePrepared).toHaveBeenCalledOnce();
-    expect(service.requireReady).not.toHaveBeenCalled();
-  });
-
-  it("loads Workflow sidebar records without waiting for full state preparation", async () => {
-    const { invoke, service } = setup();
-
-    await expect(invoke(AUTOMATION_CHANNELS.workflowSidebar)).resolves.toEqual({
-      workflows: [{ workflowId: "workflow-1" }],
-    });
-
-    expect(service.workflowSidebar).toHaveBeenCalledOnce();
-    expect(service.requirePrepared).not.toHaveBeenCalled();
     expect(service.requireReady).not.toHaveBeenCalled();
   });
 
@@ -338,31 +304,6 @@ describe("registerAutomationIpc", () => {
     expect(hub.updateConfiguredAgents).toHaveBeenCalledWith([
       expect.objectContaining({ id: "agent-1", mcpBindings: [] }),
     ]);
-  });
-
-  it("bounds workflow planning input at the IPC boundary", async () => {
-    const { invoke, hub } = setup();
-
-    await expect(invoke(AUTOMATION_CHANNELS.workflowDraftSend, {
-      workflowId: "wf-1",
-      reply: "x".repeat(200_001),
-    })).rejects.toThrow(/too big|too long|maximum/i);
-    expect(hub.sendWorkflowDraftReply).not.toHaveBeenCalled();
-  });
-
-  it("validates and delegates Review-to-Manager requests", async () => {
-    const { invoke, hub } = setup();
-
-    await expect(invoke(AUTOMATION_CHANNELS.workflowReviewApplyToManager, {
-      workflowId: "wf-1",
-      reviewedRevision: 3,
-    })).resolves.toEqual({ workflowDraft: { workflowId: "wf-1", reviewedRevision: 3 } });
-    expect(hub.applyWorkflowReviewToManager).toHaveBeenCalledWith({ workflowId: "wf-1", reviewedRevision: 3 });
-
-    await expect(invoke(AUTOMATION_CHANNELS.workflowReviewApplyToManager, {
-      workflowId: "wf-1",
-      reviewedRevision: 0,
-    })).rejects.toThrow();
   });
 
   it("validates and delegates Evaluation datasets", async () => {

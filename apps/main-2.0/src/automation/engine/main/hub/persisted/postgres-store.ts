@@ -1,10 +1,9 @@
 import { asRecord, asString } from "./persisted-values";
 import type { PostgresDatabase, PostgresQueryable } from "../../../../../core/postgres/database";
 import type { PersistedAppStateV5 } from "./agent-hub-persistence";
-import type { WorkflowSidebarItem } from "../../../shared/types";
 import type { AgentHubPersistedStore } from "./persisted-store";
 import { PostgresChatRepository } from "./postgres-chat-repository";
-import { jsonParameter, postgresRecord, postgresTime } from "./postgres-values";
+import { jsonParameter, postgresRecord } from "./postgres-values";
 
 const AUX_STATE_ID = 1;
 
@@ -55,35 +54,6 @@ export class PostgresAppStore implements AgentHubPersistedStore {
     Object.assign(payload, await this.chats.load(this.database));
     payload.workflowStore = { activeWorkflowId: undefined, workflows: [], runs: [] };
     return payload;
-  }
-
-  async loadWorkflowSidebar(): Promise<{
-    activeWorkflowId?: string;
-    workflows: WorkflowSidebarItem[];
-  }> {
-    const result = await this.database.query<{
-      id: string;
-      name: string;
-      description: string;
-      definition: { nodes?: unknown[] };
-      created_at: unknown;
-      updated_at: unknown;
-    }>("select id, name, description, definition, created_at, updated_at from agent_recall.workflows order by created_at desc, id");
-    const workflows: WorkflowSidebarItem[] = result.rows.map((row) => ({
-      workflowId: row.id,
-      sourceType: "user",
-      title: row.name,
-      status: "draft",
-      revision: 1,
-      objective: row.description,
-      nodeCount: Array.isArray(row.definition?.nodes) ? row.definition.nodes.length : 0,
-      createdAt: postgresTime(row.created_at),
-      updatedAt: postgresTime(row.updated_at),
-    }));
-    return {
-      ...(workflows[0] ? { activeWorkflowId: workflows[0].workflowId } : {}),
-      workflows,
-    };
   }
 
   async save(payload: PersistedAppStateV5): Promise<void> {
