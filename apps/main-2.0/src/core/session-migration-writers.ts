@@ -44,6 +44,7 @@ export interface WrittenMigratedSession {
 export type WriteMigratedSessionResult = WrittenMigratedSession;
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const CODEX_API_ID_MAX_LENGTH = 64;
 
 export async function writeMigratedSession(options: WriteMigratedSessionOptions): Promise<WrittenMigratedSession> {
   const homeDir = options.homeDir ?? os.homedir();
@@ -290,7 +291,7 @@ function codexSubagentActivityRows(
         timestamp: subagent.startedAt,
         payload: {
           type: "function_call",
-          id: `fc_${digest}`,
+          id: `fc_${digest.slice(0, CODEX_API_ID_MAX_LENGTH - "fc_".length)}`,
           name: "spawn_agent",
           namespace: "collaboration",
           arguments: JSON.stringify({
@@ -317,7 +318,7 @@ function codexSubagentActivityRows(
         timestamp: subagent.startedAt,
         payload: {
           type: "function_call_output",
-          id: `fco_${digest}`,
+          id: `fco_${digest.slice(0, CODEX_API_ID_MAX_LENGTH - "fco_".length)}`,
           call_id: callId,
           output: JSON.stringify({ task_name: agentPath }),
           internal_chat_message_metadata_passthrough: { turn_id: turnId },
@@ -1057,6 +1058,13 @@ function validateCodexStructure(
     ))
   ) {
     failValidation("codex", "has invalid session metadata");
+  }
+  if (rows.some((row) => {
+    const candidate = record(row);
+    const id = candidate?.type === "response_item" ? record(candidate.payload)?.id : undefined;
+    return typeof id === "string" && id.length > CODEX_API_ID_MAX_LENGTH;
+  })) {
+    failValidation("codex", "has a response item id that exceeds the API limit");
   }
 
   let rowIndex = 1;

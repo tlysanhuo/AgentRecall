@@ -160,9 +160,12 @@ describe("writeMigratedSession", () => {
       });
       const rows = readRows(result.filePath);
       const spawn = rows.find((row) => row.type === "response_item" && row.payload?.name === "spawn_agent");
+      const output = rows.find((row) => row.type === "response_item" && row.payload?.type === "function_call_output");
       const activity = rows.find((row) => row.type === "event_msg" && row.payload?.type === "sub_agent_activity");
 
       expect(result.sessionId).toBe(SESSION_ID);
+      expect(spawn?.payload.id).toHaveLength(64);
+      expect(output?.payload.id).toHaveLength(64);
       expect(JSON.parse(spawn?.payload.arguments)).toMatchObject({ task_name: "child", message: "Research child" });
       expect(activity?.payload).toMatchObject({
         agent_thread_id: CHILD_SESSION_ID,
