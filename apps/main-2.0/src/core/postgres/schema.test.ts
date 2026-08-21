@@ -785,4 +785,97 @@ describe("AgentRecall PostgreSQL schema", () => {
     }]);
     await repeatedDatabase.close();
   });
+
+  it("invalidates existing DeepSeek token accounting exactly once", async () => {
+    const pool = new PGliteTestPool();
+    const legacyDatabase = new PostgresDatabase(pool, {
+      migrationLock: false,
+      migrations: POSTGRES_MIGRATIONS.filter((migration) => migration.version <= 39),
+    });
+    await legacyDatabase.initialize();
+    await legacyDatabase.query(`
+      insert into agent_recall.sessions (
+        session_key, raw_id, source, environment_id, project_path, file_path,
+        original_title, first_question, started_at, file_mtime_ms, file_size,
+        indexed_at, content_indexed_mtime_ms, content_indexed_size, is_subagent
+      ) values
+        (
+          'deepseek:legacy', 'legacy', 'deepseek-cli', 'local', '/repo', '/deepseek.jsonl.zstd',
+          'DeepSeek', 'Question', now(), 123, 456, now(), 123, 456, false
+        ),
+        (
+          'claude:unchanged', 'unchanged', 'claude-cli', 'local', '/repo', '/claude.jsonl',
+          'Claude', 'Question', now(), 123, 456, now(), 123, 456, false
+        );
+    `);
+
+    const upgradedDatabase = new PostgresDatabase(pool, {
+      migrationLock: false,
+      migrations: POSTGRES_MIGRATIONS,
+    });
+    await upgradedDatabase.initialize();
+
+    const result = await upgradedDatabase.query<{
+      session_key: string;
+      file_mtime_ms: number | string;
+      content_indexed_mtime_ms: number | string;
+      content_indexed_size: number | string;
+    }>(`
+      select session_key, file_mtime_ms, content_indexed_mtime_ms, content_indexed_size
+      from agent_recall.sessions
+      where session_key in ('deepseek:legacy', 'claude:unchanged')
+      order by session_key
+    `);
+    expect(result.rows.map((row) => ({
+      ...row,
+      file_mtime_ms: Number(row.file_mtime_ms),
+      content_indexed_mtime_ms: Number(row.content_indexed_mtime_ms),
+      content_indexed_size: Number(row.content_indexed_size),
+    }))).toEqual([
+      {
+        session_key: "claude:unchanged",
+        file_mtime_ms: 123,
+        content_indexed_mtime_ms: 123,
+        content_indexed_size: 456,
+      },
+      {
+        session_key: "deepseek:legacy",
+        file_mtime_ms: 0,
+        content_indexed_mtime_ms: 0,
+        content_indexed_size: 0,
+      },
+    ]);
+
+    await upgradedDatabase.query(`
+      update agent_recall.sessions
+      set file_mtime_ms = 789,
+          content_indexed_mtime_ms = 789,
+          content_indexed_size = 456
+      where session_key = 'deepseek:legacy'
+    `);
+    const repeatedDatabase = new PostgresDatabase(pool, {
+      migrationLock: false,
+      migrations: POSTGRES_MIGRATIONS,
+    });
+    await repeatedDatabase.initialize();
+    const repeated = await repeatedDatabase.query<{
+      file_mtime_ms: number | string;
+      content_indexed_mtime_ms: number | string;
+      content_indexed_size: number | string;
+    }>(`
+      select file_mtime_ms, content_indexed_mtime_ms, content_indexed_size
+      from agent_recall.sessions
+      where session_key = 'deepseek:legacy'
+    `);
+    expect(repeated.rows.map((row) => ({
+      file_mtime_ms: Number(row.file_mtime_ms),
+      content_indexed_mtime_ms: Number(row.content_indexed_mtime_ms),
+      content_indexed_size: Number(row.content_indexed_size),
+    }))).toEqual([{
+      file_mtime_ms: 789,
+      content_indexed_mtime_ms: 789,
+      content_indexed_size: 456,
+    }]);
+    await repeatedDatabase.close();
+  });
 });

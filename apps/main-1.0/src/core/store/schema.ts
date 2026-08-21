@@ -317,6 +317,7 @@ export function migrateSessionStore(db: SessionStoreDatabase): void {
   runCursorEmptyComposerShellsMigration(db);
   runRemoveClaudeCodexInternalSourcesMigration(db);
   runCacheTokenSemanticsMigration(db);
+  runDeepSeekTokenAccountingMigration(db);
   runCodexSessionSemanticsMigration(db);
   runCodexTraceDetailMigration(db);
   runInjectedUserNoiseMigration(db);
@@ -614,6 +615,30 @@ function runCacheTokenSemanticsMigration(db: SessionStoreDatabase): void {
               content_indexed_mtime_ms = 0,
               content_indexed_size = 0
           WHERE source IN ('claude-cli', 'claude-app', 'tclaude-cli', 'zcode-cli')
+        `,
+      ).run();
+      db.prepare("INSERT INTO data_migrations (id, applied_at) VALUES (?, ?)").run(migrationId, Date.now());
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function runDeepSeekTokenAccountingMigration(db: SessionStoreDatabase): void {
+  const migrationId = "deepseek-token-accounting-v1";
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const applied = db.prepare("SELECT 1 FROM data_migrations WHERE id = ?").get(migrationId);
+    if (!applied) {
+      db.prepare(
+        `
+          UPDATE sessions
+          SET file_mtime_ms = 0,
+              content_indexed_mtime_ms = 0,
+              content_indexed_size = 0
+          WHERE source = 'deepseek-cli'
         `,
       ).run();
       db.prepare("INSERT INTO data_migrations (id, applied_at) VALUES (?, ?)").run(migrationId, Date.now());

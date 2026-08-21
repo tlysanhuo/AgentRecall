@@ -359,16 +359,18 @@ interface DeepSeekUsage {
   cacheWriteTokens: number;
 }
 
-function deepSeekUsageOf(event: DeepSeekSessionEvent): DeepSeekUsage | null {
-  const data = deepSeekRecord(event.data);
-  const usage = deepSeekRecord(data?.usage);
+function normalizeDeepSeekUsage(value: unknown): DeepSeekUsage | null {
+  const usage = deepSeekRecord(value);
   if (!usage) return null;
   const number = (value: unknown): number => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+  const outputTokens = number(usage.outputTokens);
+  const reasoningTokens = number(usage.reasoningTokens);
+  // Harness output already includes reasoning; AgentRecall stores disjoint buckets.
   return {
     inputTokens: number(usage.inputTokens),
-    outputTokens: number(usage.outputTokens),
+    outputTokens: Math.max(0, outputTokens - reasoningTokens),
     cacheReadTokens: number(usage.cacheReadTokens),
-    reasoningTokens: number(usage.reasoningTokens),
+    reasoningTokens,
     cacheWriteTokens: number(usage.cacheWriteTokens),
   };
 }
@@ -377,26 +379,19 @@ function deepSeekUsageOfEvent(event: DeepSeekSessionEvent): { turn: number; step
   const data = deepSeekRecord(event.data);
   if (data === null) return null;
   if (event.type === "assistant/message") {
-    const usage = deepSeekUsageOf(event);
+    const usage = normalizeDeepSeekUsage(data.usage);
     if (usage === null) return null;
     return { turn: deepSeekNumber(data.turn), step: deepSeekNumber(data.step), usage };
   }
   if (event.type === "assistant/chunk") {
     const chunk = deepSeekRecord(data.chunk);
     if (chunk === null || chunk.type !== "usage") return null;
-    const usageRecord = deepSeekRecord(chunk.usage);
-    if (usageRecord === null) return null;
-    const number = (value: unknown): number => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+    const usage = normalizeDeepSeekUsage(chunk.usage);
+    if (usage === null) return null;
     return {
       turn: deepSeekNumber(data.turn),
       step: deepSeekNumber(data.step),
-      usage: {
-        inputTokens: number(usageRecord.inputTokens),
-        outputTokens: number(usageRecord.outputTokens),
-        cacheReadTokens: number(usageRecord.cacheReadTokens),
-        reasoningTokens: number(usageRecord.reasoningTokens),
-        cacheWriteTokens: number(usageRecord.cacheWriteTokens),
-      },
+      usage,
     };
   }
   return null;
@@ -409,21 +404,21 @@ function deepSeekNumber(value: unknown): number {
 /**
  * Token usage fold that mirrors deepseek-harness tokenUsageProjection:
  * usage samples for the same turn/step replace each other (last wins) instead
- * of double counting, and samples for a later step replace the previous step.
+ * of double counting, while later turn/step samples accumulate independently.
  */
 interface DeepSeekUsageFold {
   usage: DeepSeekUsage;
   tokenEvents: TokenUsageEvent[];
 }
 
-function deepSeekTotalUsage(events: DeepSeekSessionEvent[]): DeepSeekUsageFold {
+function deepSeekTotalUsage(events: DeepSeekSessionEvent[], sessionId: string): DeepSeekUsageFold {
   const totals: DeepSeekUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, reasoningTokens: 0, cacheWriteTokens: 0 };
   const tokenEvents: TokenUsageEvent[] = [];
   let last: { turn: number; step: number; usage: DeepSeekUsage } | null = null;
   for (const event of events) {
     const sample = deepSeekUsageOfEvent(event);
     if (sample === null || sample.turn < 0 || sample.step < 0) continue;
-    const dedupeKey = "deepseek:" + sample.turn + ":" + sample.step;
+    const dedupeKey = `deepseek:${sessionId}:${sample.turn}:${sample.step}`;
     if (last !== null && last.turn === sample.turn && last.step === sample.step) {
       if (
         last.usage.inputTokens === sample.usage.inputTokens
@@ -448,11 +443,17 @@ function deepSeekTotalUsage(events: DeepSeekSessionEvent[]): DeepSeekUsageFold {
       inputTokens: sample.usage.inputTokens,
       outputTokens: sample.usage.outputTokens,
       cachedInputTokens: sample.usage.cacheReadTokens,
+      ...(sample.usage.cacheWriteTokens > 0
+        ? { cacheCreationInputTokens: sample.usage.cacheWriteTokens }
+        : {}),
       reasoningOutputTokens: sample.usage.reasoningTokens,
-      totalTokens: sample.usage.inputTokens + sample.usage.outputTokens + sample.usage.cacheReadTokens + sample.usage.reasoningTokens,
+      totalTokens: sample.usage.inputTokens
+        + sample.usage.outputTokens
+        + sample.usage.cacheReadTokens
+        + sample.usage.cacheWriteTokens
+        + sample.usage.reasoningTokens,
       timestamp: deepSeekEventTimeMs(event),
       dedupeKey,
-      sourceTurnId: sample.turn + ":" + sample.step,
     });
     last = sample;
   }
@@ -601,7 +602,7 @@ export interface DeepSeekSessionView {
  * user/assistant messages, tool trace events, the latest title, and usage.
  */
 export function projectDeepSeekSession(log: DeepSeekSessionLog, source: SessionFormat = "deepseek"): DeepSeekSessionView {
-  const fold = deepSeekTotalUsage(log.events);
+  const fold = deepSeekTotalUsage(log.events, log.header.id);
   return {
     title: deepSeekTitle(log.events),
     messages: deepSeekSessionMessages(log),

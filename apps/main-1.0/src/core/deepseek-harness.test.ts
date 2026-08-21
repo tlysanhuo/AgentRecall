@@ -60,12 +60,13 @@ describe("deepseek harness session parser", () => {
         { type: "turn/start", seq: 1, time: 1700000000002, data: { turn: 1 } },
         { type: "step/start", seq: 2, time: 1700000000003, data: { turn: 1, step: 1 } },
         { type: "user/message", seq: 3, time: 1700000000004, data: { id: "m1", role: "user", content: [{ type: "text", text: "请修复登录 bug" }], source: { kind: "user", rpcId: "rpc1" } }, surfaceOp: "append" },
-        { type: "assistant/message", seq: 4, time: 1700000000005, data: { turn: 1, step: 1, message: { id: "m2", role: "assistant", content: [{ type: "text", text: "好的，先查看代码。" }], source: { kind: "model", provider: "tt-switch", model: "deepseek-v4-pro-ioa" } }, usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 2 } }, surfaceOp: "append" },
-        { type: "tool/call", seq: 5, time: 1700000000006, data: { turn: 1, step: 1, callId: "call_1", name: "bash", arguments: "ls" } },
-        { type: "tool/result", seq: 6, time: 1700000000007, data: { turn: 1, step: 1, message: { id: "m3", role: "user", content: [{ type: "tool-result", toolCallId: "call_1", content: [{ type: "text", text: "demo" }] }], source: { kind: "tool", callId: "call_1" } } } },
-        { type: "step/end", seq: 7, time: 1700000000008, data: { turn: 1, step: 1 } },
-        { type: "turn/end", seq: 8, time: 1700000000009, data: { turn: 1, reason: { kind: "completed" } } },
-        { type: "session/title", seq: 9, time: 1700000000010, data: { title: "修复登录 bug", messageSeqs: [3], source: { kind: "fallback" } } },
+        { type: "assistant/chunk", seq: 4, time: 1700000000005, data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 9, outputTokens: 4, cacheReadTokens: 1, cacheWriteTokens: 1, reasoningTokens: 1 } } } },
+        { type: "assistant/message", seq: 5, time: 1700000000006, data: { turn: 1, step: 1, message: { id: "m2", role: "assistant", content: [{ type: "text", text: "好的，先查看代码。" }], source: { kind: "model", provider: "tt-switch", model: "deepseek-v4-pro-ioa" } }, usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 2, cacheWriteTokens: 3, reasoningTokens: 2 } }, surfaceOp: "append" },
+        { type: "tool/call", seq: 6, time: 1700000000007, data: { turn: 1, step: 1, callId: "call_1", name: "bash", arguments: "ls" } },
+        { type: "tool/result", seq: 7, time: 1700000000008, data: { turn: 1, step: 1, message: { id: "m3", role: "user", content: [{ type: "tool-result", toolCallId: "call_1", content: [{ type: "text", text: "demo" }] }], source: { kind: "tool", callId: "call_1" } } } },
+        { type: "step/end", seq: 8, time: 1700000000009, data: { turn: 1, step: 1 } },
+        { type: "turn/end", seq: 9, time: 1700000000010, data: { turn: 1, reason: { kind: "completed" } } },
+        { type: "session/title", seq: 10, time: 1700000000011, data: { title: "修复登录 bug", messageSeqs: [3], source: { kind: "fallback" } } },
       ];
       const text = lines.map((line) => JSON.stringify(line)).join("\n") + "\n";
       const compressed = zstdCompressSync(Buffer.from(text));
@@ -76,14 +77,29 @@ describe("deepseek harness session parser", () => {
 
       const loaded = loadDeepSeekCliSessions(root);
       expect(loaded).toHaveLength(1);
-      const { session, messages, traceEvents = [] } = loaded[0];
+      const { session, messages, tokenEvents = [], traceEvents = [] } = loaded[0];
       expect(session.rawId).toBe("session-abc");
       expect(session.projectPath).toBe("/work/demo");
       expect(session.originalTitle).toBe("修复登录 bug");
       expect(session.source).toBe("deepseek-cli");
-      expect(session.tokenUsage?.inputTokens).toBe(10);
-      expect(session.tokenUsage?.outputTokens).toBe(5);
-      expect(session.tokenUsage?.cachedInputTokens).toBe(2);
+      expect(session.tokenUsage).toEqual({
+        inputTokens: 10,
+        outputTokens: 3,
+        cachedInputTokens: 2,
+        cacheCreationInputTokens: 3,
+        reasoningOutputTokens: 2,
+        totalTokens: 20,
+      });
+      expect(tokenEvents).toEqual([{
+        inputTokens: 10,
+        outputTokens: 3,
+        cachedInputTokens: 2,
+        cacheCreationInputTokens: 3,
+        reasoningOutputTokens: 2,
+        totalTokens: 20,
+        timestamp: 1700000000006,
+        dedupeKey: "deepseek:session-abc:1:1",
+      }]);
       expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
       expect(messages[0].content).toBe("请修复登录 bug");
       expect(messages[1].content).toBe("好的，先查看代码。");

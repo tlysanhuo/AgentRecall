@@ -3146,12 +3146,19 @@ function extractProjectPathFromJson(value: unknown): string {
   return firstStringField(parsed, ["cwd", "directory", "projectPath", "project_path", "workdir", "workspacePath", "workspace_path"]);
 }
 
-function createSourceTokenUsage(inputTokens: number, outputTokens: number, cachedInputTokens: number, reasoningOutputTokens: number): TokenUsage {
+function createSourceTokenUsage(
+  inputTokens: number,
+  outputTokens: number,
+  cachedInputTokens: number,
+  reasoningOutputTokens: number,
+  cacheCreationInputTokens = 0,
+): TokenUsage {
   return createTokenUsage(
     Math.max(0, inputTokens),
     Math.max(0, outputTokens),
     Math.max(0, cachedInputTokens),
     Math.max(0, reasoningOutputTokens),
+    Math.max(0, cacheCreationInputTokens),
   );
 }
 
@@ -3172,6 +3179,7 @@ export function loadDeepSeekCliSessionFile(filePath: string, stat: VirtualSessio
     view.usage.outputTokens,
     view.usage.cacheReadTokens,
     view.usage.reasoningTokens,
+    view.usage.cacheWriteTokens,
   );
   return {
     session: createIndexedSession({

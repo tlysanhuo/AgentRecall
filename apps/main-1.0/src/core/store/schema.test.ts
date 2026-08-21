@@ -316,6 +316,64 @@ describe("session store schema", () => {
     }
   });
 
+  it("invalidates DeepSeek token accounting exactly once", () => {
+    const db = new DatabaseSync(":memory:");
+    try {
+      migrateSessionStore(db);
+      db.prepare("DELETE FROM data_migrations WHERE id = 'deepseek-token-accounting-v1'").run();
+      const insert = db.prepare(`
+        INSERT INTO sessions (
+          session_key, raw_id, source, project_path, file_path,
+          original_title, first_question, timestamp, file_mtime_ms, file_size,
+          content_indexed_mtime_ms, content_indexed_size
+        ) VALUES (?, ?, ?, '/repo', ?, 'Title', 'Question', 1, 123, 456, 123, 456)
+      `);
+      insert.run("deepseek:legacy", "legacy", "deepseek-cli", "/tmp/deepseek.jsonl.zstd");
+      insert.run("claude:unchanged", "unchanged", "claude-cli", "/tmp/claude.jsonl");
+
+      migrateSessionStore(db);
+
+      expect(db.prepare(`
+        SELECT session_key, file_mtime_ms, content_indexed_mtime_ms, content_indexed_size
+        FROM sessions
+        ORDER BY session_key
+      `).all()).toEqual([
+        {
+          session_key: "claude:unchanged",
+          file_mtime_ms: 123,
+          content_indexed_mtime_ms: 123,
+          content_indexed_size: 456,
+        },
+        {
+          session_key: "deepseek:legacy",
+          file_mtime_ms: 0,
+          content_indexed_mtime_ms: 0,
+          content_indexed_size: 0,
+        },
+      ]);
+
+      db.prepare(`
+        UPDATE sessions
+        SET file_mtime_ms = 789,
+            content_indexed_mtime_ms = 789,
+            content_indexed_size = 456
+        WHERE session_key = 'deepseek:legacy'
+      `).run();
+      migrateSessionStore(db);
+      expect(db.prepare(`
+        SELECT file_mtime_ms, content_indexed_mtime_ms, content_indexed_size
+        FROM sessions
+        WHERE session_key = 'deepseek:legacy'
+      `).get()).toEqual({
+        file_mtime_ms: 789,
+        content_indexed_mtime_ms: 789,
+        content_indexed_size: 456,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
   it("invalidates session relation and branch metadata exactly once", () => {
     const db = new DatabaseSync(":memory:");
     try {
