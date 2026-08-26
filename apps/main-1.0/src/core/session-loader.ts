@@ -3837,6 +3837,7 @@ function loadOpenCodeSessionRow(
   const { messages, traceEvents, tokenEvents } = opencodeMessagesFromParts(db, rawId, sourceOptions.traceSource);
   const question = firstQuestion(messages);
   const stat = safeStat(dbPath);
+  const parentSessionId = stringField(session, "parent_id") || null;
   const usage = tokenEvents.length
     ? tokenUsageFromEvents(tokenEvents)
     : createSourceTokenUsage(
@@ -3857,6 +3858,8 @@ function loadOpenCodeSessionRow(
       timestamp: timestampMs(unknownField(session, "time_updated")) || timestampMs(unknownField(session, "time_created")) || stat.mtimeMs,
       tokenUsage: usage,
       stat,
+      isSubagent: parentSessionId !== null,
+      parentSessionId,
     }),
     messages,
     tokenEvents,

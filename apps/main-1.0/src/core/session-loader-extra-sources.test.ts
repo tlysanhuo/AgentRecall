@@ -635,6 +635,61 @@ describe("extra session sources", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  it("marks OpenCode subagent sessions via session.parent_id", () => {
+    const root = tmpDir("opencode-subagent");
+    const shareDir = path.join(root, ".local", "share", "opencode");
+    fs.mkdirSync(shareDir, { recursive: true });
+    const dbPath = path.join(shareDir, "opencode.db");
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE session (
+        id TEXT PRIMARY KEY,
+        parent_id TEXT,
+        directory TEXT NOT NULL,
+        title TEXT NOT NULL,
+        time_created INTEGER NOT NULL,
+        time_updated INTEGER
+      );
+      CREATE TABLE message (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        time_created INTEGER NOT NULL,
+        data TEXT NOT NULL
+      );
+      CREATE TABLE part (
+        id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        time_created INTEGER NOT NULL,
+        data TEXT NOT NULL
+      );
+    `);
+    const insertSession = db.prepare("INSERT INTO session (id, parent_id, directory, title, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?)");
+    insertSession.run("opencode-root", null, "/work/opencode-app", "Root session", 1_000, 2_000);
+    insertSession.run("opencode-child", "opencode-root", "/work/opencode-app", "Subagent session", 1_100, 1_900);
+    const insertMessage = db.prepare("INSERT INTO message (id, session_id, type, time_created, data) VALUES (?, ?, ?, ?, ?)");
+    const insertPart = db.prepare("INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)");
+    insertMessage.run("msg-root-user", "opencode-root", "user", 1_100, JSON.stringify({ role: "user" }));
+    insertPart.run("part-root-user", "msg-root-user", "opencode-root", 1_100, JSON.stringify({ type: "text", text: "Audit the auth flow" }));
+    insertMessage.run("msg-child-user", "opencode-child", "user", 1_200, JSON.stringify({ role: "user" }));
+    insertPart.run("part-child-user", "msg-child-user", "opencode-child", 1_200, JSON.stringify({ type: "text", text: "Inspect middleware" }));
+    db.close();
+
+    const loaded = loadOpenCodeSessions(root);
+
+    expect(loaded).toHaveLength(2);
+    const byKey = new Map(loaded.map((item) => [item.session.sessionKey, item.session]));
+    expect(byKey.get("opencode:opencode-root")).toMatchObject({ isSubagent: false, parentSessionId: null });
+    expect(byKey.get("opencode:opencode-child")).toMatchObject({
+      sessionKey: "opencode:opencode-child",
+      isSubagent: true,
+      parentSessionId: "opencode-root",
+    });
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   it("loads CodeWiz token usage from message and part JSON", () => {
     const root = tmpDir("codewiz-tokens");
     const dbPath = path.join(root, "opencode.db");
