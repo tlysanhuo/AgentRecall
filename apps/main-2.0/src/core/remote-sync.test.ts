@@ -168,4 +168,79 @@ describe("remote sync", () => {
       fs.rmSync(tempHome, { recursive: true, force: true });
     }
   }, 20_000);
+
+  it("keeps CodeWiz subagent sessions linked to their parent during remote collection", async () => {
+    const store = createInMemoryStore();
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "agent-recall-v2-remote-codewiz-"));
+    const codewizDir = path.join(tempHome, ".local", "share", "codewiz");
+    fs.mkdirSync(codewizDir, { recursive: true });
+    const codewizDbPath = path.join(codewizDir, "opencode.db");
+    execFileSync(
+      process.platform === "win32" ? "python" : "python3",
+      [
+        "-c",
+        String.raw`
+import json, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.executescript('''
+CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL, title TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER, parent_id TEXT);
+CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+''')
+db.execute("INSERT INTO session (id, directory, title, time_created, time_updated) VALUES (?, ?, ?, ?, ?)", ("codewiz-parent", "/repo/codewiz", "CodeWiz parent", 1780560000000, 1780560600000))
+db.execute("INSERT INTO session (id, directory, title, time_created, time_updated, parent_id) VALUES (?, ?, ?, ?, ?, ?)", ("codewiz-child", "/repo/codewiz", "CodeWiz child", 1780560000000, 1780560600000, "codewiz-parent"))
+db.execute("INSERT INTO message (id, session_id, type, time_created, data) VALUES (?, ?, ?, ?, ?)", ("cw-user", "codewiz-parent", "user", 1780560060000, json.dumps({"role": "user"})))
+db.execute("INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)", ("cw-user-part", "cw-user", "codewiz-parent", 1780560060000, json.dumps({"type": "text", "text": "codewiz parent question"})))
+db.execute("INSERT INTO message (id, session_id, type, time_created, data) VALUES (?, ?, ?, ?, ?)", ("cw-child-user", "codewiz-child", "user", 1780560060000, json.dumps({"role": "user"})))
+db.execute("INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)", ("cw-child-user-part", "cw-child-user", "codewiz-child", 1780560060000, json.dumps({"type": "text", "text": "codewiz child question"})))
+db.commit()
+db.close()
+`,
+        codewizDbPath,
+      ],
+      { encoding: "utf8" },
+    );
+
+    try {
+      const environment = await store.upsertEnvironment({
+        id: "ssh-devbox",
+        kind: "ssh",
+        label: "devbox",
+        hostAlias: "devbox",
+        host: "devbox.example.com",
+        authMode: "none",
+        enabled: true,
+      });
+      await syncRemoteEnvironment(store, environment, {
+        runSsh: async (_environment, command) => execFileSync(
+          process.platform === "win32" ? "python" : "python3",
+          ["-c", decodeCollectorScript(command)],
+          {
+            encoding: "utf8",
+            env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
+          },
+        ),
+      });
+
+      await expect(store.getSession(`ssh:${environment.id}:codewiz:codewiz-parent`)).resolves.toMatchObject({
+        rawId: "codewiz-parent",
+        isSubagent: false,
+        parentSessionId: null,
+      });
+      await expect(store.getSession(`ssh:${environment.id}:codewiz:codewiz-child`)).resolves.toMatchObject({
+        rawId: "codewiz-child",
+        isSubagent: true,
+        parentSessionId: "codewiz-parent",
+      });
+      const rootSessions = await store.searchSessions({
+        environmentId: environment.id,
+        excludeSubagents: true,
+      });
+      expect(rootSessions).toHaveLength(1);
+      expect(rootSessions[0]?.rawId).toBe("codewiz-parent");
+    } finally {
+      await store.close();
+      fs.rmSync(tempHome, { recursive: true, force: true });
+    }
+  }, 20_000);
 });

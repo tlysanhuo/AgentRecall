@@ -1456,6 +1456,9 @@ def emit_codewiz_summaries(db_path, stat):
   try:
     for session in sessions:
       raw_id = session["id"]
+      parent_session_id = session["parent_id"] if "parent_id" in session.keys() else None
+      if not isinstance(parent_session_id, str) or not parent_session_id:
+        parent_session_id = None
       first_question = ""
       message_count = 0
       message_events = []
@@ -1484,6 +1487,8 @@ def emit_codewiz_summaries(db_path, stat):
         "gitBranch": "",
         "tokenUsage": _tok_total(token_events) if token_events else codewiz_token_usage(session),
         "tokenEvents": token_events,
+        "isSubagent": parent_session_id is not None,
+        "parentSessionId": parent_session_id,
       })
   finally:
     try:
