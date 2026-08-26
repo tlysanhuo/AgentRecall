@@ -1594,18 +1594,32 @@ function zcodeTokenEventsFromModelUsage(
   }
 }
 
+function zcodeTaskLinkParentMap(db: import("node:sqlite").DatabaseSync): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!sqliteTableExists(db, "session_task_link")) return map;
+  if (!sqliteHasColumns(db, "session_task_link", ["child_session_id", "parent_session_id"])) return map;
+  const rows = db.prepare("SELECT child_session_id, parent_session_id FROM session_task_link").all() as Array<Record<string, unknown>>;
+  for (const row of rows) {
+    const childSessionId = stringField(row, "child_session_id");
+    const parentSessionId = stringField(row, "parent_session_id");
+    if (childSessionId && parentSessionId) map.set(childSessionId, parentSessionId);
+  }
+  return map;
+}
+
 function loadZcodeSessionRow(
   db: import("node:sqlite").DatabaseSync,
   dbPath: string,
   stat: VirtualSessionFileStat,
   session: Record<string, unknown>,
+  taskLinkParents: Map<string, string>,
 ): LoadedSession | null {
   const rawId = stringField(session, "id");
   if (!rawId) return null;
   const { messages, traceEvents, assistantMessageIds } = zcodeMessagesFromParts(db, rawId);
   const tokenEvents = zcodeTokenEventsFromModelUsage(db, rawId, assistantMessageIds);
   const question = firstQuestion(messages);
-  const parentSessionId = stringField(session, "parent_id") || null;
+  const parentSessionId = stringField(session, "parent_id") || taskLinkParents.get(rawId) || null;
   return {
     session: createIndexedSession({
       keyPrefix: "zcode",
@@ -1636,11 +1650,12 @@ export function loadZcodeSessions(zcodeDir = path.join(os.homedir(), ".zcode")):
     if (!sqliteHasColumns(db, "message", ["id", "session_id", "time_created", "data"])) return [];
     if (!sqliteHasColumns(db, "part", ["id", "message_id", "session_id", "time_created", "data"])) return [];
     const stat = zcodeDatabaseStat(dbPath);
+    const taskLinkParents = zcodeTaskLinkParentMap(db);
     const sessions = db.prepare("SELECT * FROM session ORDER BY time_updated DESC, time_created DESC, id").all() as Array<Record<string, unknown>>;
     return sessions
       .map((session) => {
         try {
-          return loadZcodeSessionRow(db, dbPath, stat, session);
+          return loadZcodeSessionRow(db, dbPath, stat, session, taskLinkParents);
         } catch {
           return null;
         }

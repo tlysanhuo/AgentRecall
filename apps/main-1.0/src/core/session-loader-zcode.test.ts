@@ -274,6 +274,51 @@ describe("ZCode session loader", () => {
     }
   });
 
+  it("marks workflow task sessions as subagents via session_task_link", () => {
+    const root = tempZcodeRoot("task-link");
+    const db = new DatabaseSync(databasePath(root));
+    createCoreSchema(db);
+    db.exec(`
+      CREATE TABLE session_task_link (
+        id TEXT PRIMARY KEY,
+        root_workflow_run_id TEXT,
+        parent_link_id TEXT,
+        activity_id TEXT,
+        parent_session_id TEXT,
+        child_session_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        depth INTEGER NOT NULL DEFAULT 0,
+        path TEXT NOT NULL,
+        phase TEXT,
+        label TEXT,
+        agent_type TEXT,
+        model TEXT,
+        status TEXT NOT NULL,
+        time_created INTEGER NOT NULL,
+        time_updated INTEGER NOT NULL
+      );
+    `);
+    insertSession(db, "session-root", "/work/app");
+    insertSession(db, "session-task", "/work/app");
+    insertSession(db, "session-orphan-task", "/work/app");
+    insertSession(db, "session-direct-child", "/work/app", "session-root");
+    const insertLink = db.prepare(
+      "INSERT INTO session_task_link (id, parent_session_id, child_session_id, role, depth, path, status, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    insertLink.run("link-task", "session-root", "session-task", "task", 1, "0.1", "completed", 1, 2);
+    insertLink.run("link-orphan", null, "session-orphan-task", "task", 1, "0.2", "completed", 1, 2);
+    insertMessage(db, "task-message", "session-task", Date.parse("2026-07-21T08:01:00Z"), JSON.stringify({ role: "user" }));
+    insertPart(db, "task-part", "task-message", "session-task", Date.parse("2026-07-21T08:01:00Z"), JSON.stringify({ type: "text", text: "Run the workflow task" }));
+    db.close();
+
+    const loaded = loadZcodeSessions(root);
+    const byRawId = new Map(loaded.map((item) => [item.session.rawId, item.session]));
+    expect(byRawId.get("session-root")).toMatchObject({ isSubagent: false, parentSessionId: null });
+    expect(byRawId.get("session-task")).toMatchObject({ isSubagent: true, parentSessionId: "session-root" });
+    expect(byRawId.get("session-orphan-task")).toMatchObject({ isSubagent: false, parentSessionId: null });
+    expect(byRawId.get("session-direct-child")).toMatchObject({ isSubagent: true, parentSessionId: "session-root" });
+  });
+
   it("indexes legacy sessions without usage tables with zero token usage", () => {
     const root = tempZcodeRoot("legacy");
     const db = new DatabaseSync(databasePath(root));
