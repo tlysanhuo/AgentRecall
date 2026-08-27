@@ -68,7 +68,7 @@ function graphRun(): EvaluationRun {
         nodes: [
           {
             nodeId: "agent",
-            nodeType: "agent_execute",
+            nodeType: "run_agent",
             nodeVersion: 1,
             role: "prepare",
             status: "pass",
@@ -139,7 +139,7 @@ describe("EvalRunsPage", () => {
 
     const text = container.textContent ?? "";
     expect(text).toContain("Login regression");
-    expect(text).toContain("Agent 执行");
+    expect(text).toContain("跑模型");
     expect(text).toContain("模型评判");
     // The judge could not decide, and the copy must say so rather than showing a zero.
     expect(text).toContain("无法判定");
@@ -179,5 +179,65 @@ describe("EvalRunsPage", () => {
     await render();
 
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("database is not ready");
+  });
+  it("shows the score broken down by dimension, not one opaque number", async () => {
+    harness.listRuns.mockResolvedValue({ items: [summary()], total: 1, offset: 0, limit: 50 });
+    harness.getRun.mockResolvedValue({
+      ...graphRun(),
+      coverage: 0.75,
+      dimensions: [
+        { dimension: "正确性", score: 0.9, weight: 4, scoredCaseCount: 2 },
+        { dimension: "简洁性", score: 0.4, weight: 1, scoredCaseCount: 2 },
+      ],
+      results: [{
+        ...graphRun().results[0]!,
+        unscoredReason: undefined,
+        score: 0.8,
+        passed: true,
+        coverage: 0.5,
+        dimensions: [
+          { dimension: "正确性", score: 0.9, weight: 4, decided: 1, undecided: 0, met: 1, unmet: 0 },
+          { dimension: "简洁性", score: 0.4, weight: 1, decided: 1, undecided: 1, met: 0, unmet: 1 },
+        ],
+        byLabel: { dimension: { 正确性: 0.9, 简洁性: 0.4 } },
+        skippedEvaluatorIds: ["tool-failures"],
+      }],
+    } satisfies EvaluationRun);
+
+    await render();
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("正确性");
+    expect(text).toContain("简洁性");
+    expect(text).toContain("覆盖率");
+    expect(text).toContain("0.80");
+    // A judge this source could not run has to stay visible rather than looking
+    // like a check that passed.
+    expect(text).toContain("不适用于该产物来源");
+    expect(text).toContain("tool-failures");
+  });
+
+  it("calls a case passed on its weighted score, not on every check passing", async () => {
+    // A case can clear its threshold with one check unmet; reading "all checks
+    // passed" would contradict the score printed beside it.
+    harness.listRuns.mockResolvedValue({ items: [summary()], total: 1, offset: 0, limit: 50 });
+    harness.getRun.mockResolvedValue({
+      ...graphRun(),
+      results: [{
+        ...graphRun().results[0]!,
+        unscoredReason: undefined,
+        score: 0.8,
+        passed: true,
+        scores: [
+          { evaluatorId: "correct", score: 1, passed: true, durationMs: 1 },
+          { evaluatorId: "brief", score: 0, passed: false, durationMs: 1 },
+        ],
+      }],
+    } satisfies EvaluationRun);
+
+    await render();
+
+    expect(container.querySelector(".eval-graph-case header .eval-badge")?.textContent)
+      .toBe("通过");
   });
 });

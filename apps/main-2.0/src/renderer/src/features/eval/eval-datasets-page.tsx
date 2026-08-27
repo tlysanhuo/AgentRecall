@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactElement } from "react";
-import { Database, Plus, Trash2, Upload } from "lucide-react";
+import { Database, FolderInput, FolderOutput, Plus, Trash2, Upload } from "lucide-react";
 
 import type {
   EvaluationDataset,
@@ -45,6 +45,7 @@ export function EvalDatasetsPage({
   const [importing, setImporting] = useState(false);
   const [importText, setImportText] = useState("");
   const [importErrors, setImportErrors] = useState<string[]>([]);
+  const [folderNote, setFolderNote] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -183,6 +184,43 @@ export function EvalDatasetsPage({
     setImporting(false);
   }, [importPreview, l]);
 
+  const importFolder = useCallback(async () => {
+    setError(null);
+    setFolderNote(null);
+    try {
+      const result = await window.sessionSearch.automation.importEvaluationDatasetFolder();
+      // Null means the picker was dismissed, which is not a failure to report.
+      if (!result) return;
+      setFolderNote(l(
+        `Imported ${result.dataset.items.length} case(s) from ${result.directory}`,
+        `已从 ${result.directory} 导入 ${result.dataset.items.length} 条用例`,
+      ));
+      // Unreadable case files are named rather than dropped, so a partial import
+      // never looks complete.
+      setImportErrors(result.errors);
+      await reload(result.dataset.id);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [l, reload]);
+
+  const exportFolder = useCallback(async () => {
+    if (!selected) return;
+    setError(null);
+    setFolderNote(null);
+    try {
+      const result = await window.sessionSearch.automation
+        .exportEvaluationDatasetFolder(selected.id);
+      if (!result) return;
+      setFolderNote(l(
+        `Wrote ${result.caseCount} case file(s) to ${result.directory}`,
+        `已把 ${result.caseCount} 个用例文件写入 ${result.directory}`,
+      ));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [l, selected]);
+
   const updateCase = useCallback((id: string, patch: Partial<EditorCase>) => {
     setCases((current) => current.map((item) => item.id === id ? { ...item, ...patch } : item));
     setDirty(true);
@@ -224,8 +262,26 @@ export function EvalDatasetsPage({
               </option>
             ))}
           </select>
+          <button type="button" className="eval-icon-button" onClick={() => void importFolder()}>
+            <FolderInput size={12} />{l("Import folder", "导入文件夹")}
+          </button>
+          <button
+            type="button"
+            className="eval-icon-button"
+            disabled={!selected}
+            onClick={() => void exportFolder()}
+          >
+            <FolderOutput size={12} />{l("Export folder", "导出文件夹")}
+          </button>
         </div>
       </header>
+      <p className="eval-muted">
+        {l(
+          "A dataset folder holds dataset.md for the overview and cases/*.json for one case each, so both a person and an agent can read and edit it in place. Importing the same folder again updates the same dataset.",
+          "数据集文件夹用 dataset.md 写总览、cases/*.json 每个文件一条用例，人和 AI 都能直接读写。再次导入同一个文件夹会更新同一个数据集。",
+        )}
+      </p>
+      {folderNote ? <p className="eval-muted">{folderNote}</p> : null}
       {error ? <p className="eval-error" role="alert">{error}</p> : null}
       <div className="eval-graph-body">
         <ul className="eval-graph-run-list">

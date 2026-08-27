@@ -120,7 +120,7 @@ describe("EvalGraphPage", () => {
       button("新建图").click();
     });
 
-    expect(container.textContent).toContain("请先在");
+    expect(container.textContent).toContain("请先到「数据集」页面创建");
     expect(button("创建并编辑").disabled).toBe(true);
   });
 
@@ -147,5 +147,29 @@ describe("EvalGraphPage", () => {
     await render();
 
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("database is not ready");
+  });
+  it("records where the artifact comes from when creating a graph", async () => {
+    await render();
+    await act(async () => {
+      button("新建图").click();
+    });
+    const select = [...container.querySelectorAll("label")]
+      .find((item) => item.textContent?.includes("产物来源"))!
+      .querySelector("select") as HTMLSelectElement;
+
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!;
+      setter.call(select, "folder");
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    // A folder has no trajectory, and the form has to say so before the choice is
+    // made rather than after a run reports skipped judges.
+    expect(container.textContent).toContain("文件夹没有轨迹");
+
+    await act(async () => {
+      button("创建并编辑").click();
+    });
+
+    expect(harness.saveExperiment.mock.calls[0]![0]).toMatchObject({ source: "folder" });
   });
 });

@@ -35,6 +35,8 @@ const REQUIRED_EXPORTS = [
   "getEvalDataset",
   "writeEvalDataset",
   "addEvalDatasetCases",
+  "importEvalDatasetFolder",
+  "exportEvalDatasetFolder",
   "listEvalEvaluators",
   "listEvalGraphs",
   "listEvalRuns",
@@ -147,6 +149,36 @@ export function registerEvalTools(server, zod, store, bundle) {
       },
     },
     async (args) => tool(() => bundle.addEvalDatasetCases(store, args)),
+  );
+
+  server.registerTool(
+    "import_eval_dataset_folder",
+    {
+      description:
+        "把磁盘上的数据集文件夹导入 AgentRecall。文件夹用 dataset.md 写总览（可带 name/description/tags 的 YAML 头），"
+        + "cases/ 下每个 .json 一条用例（input、可选 expectedOutput、context、metadata）。"
+        + "这些文件你可以直接用文件工具写；导入的数据集 id 由文件夹路径决定，"
+        + "所以改完文件再导入同一个文件夹是更新而不是新建。读不了的用例文件会在 errors 里逐条列出。",
+      inputSchema: {
+        directory: zod.string().min(1).describe("数据集文件夹的绝对路径。"),
+      },
+    },
+    async ({ directory }) => tool(() => bundle.importEvalDatasetFolder(store, directory)),
+  );
+
+  server.registerTool(
+    "export_eval_dataset_folder",
+    {
+      description:
+        "把 AgentRecall 里的数据集写成文件夹格式（dataset.md + cases/*.json），便于直接阅读和逐条修改。"
+        + "目标文件夹里 cases/ 下已有的 .json 会先清空，其他文件保留。",
+      inputSchema: {
+        dataset: zod.string().min(1).describe("数据集 id 或名称。"),
+        directory: zod.string().min(1).describe("写入目标文件夹的绝对路径。"),
+      },
+    },
+    async ({ dataset, directory }) =>
+      tool(() => bundle.exportEvalDatasetFolder(store, dataset, directory)),
   );
 
   server.registerTool(

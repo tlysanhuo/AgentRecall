@@ -101,6 +101,27 @@ export function EvalSettings({
         ) : null}
       </div>
 
+      <label className="settings-field settings-toggle">
+        <div className="settings-field-text">
+          <span className="settings-field-title">
+            {l("Allow external script judges", "允许外部脚本评判")}
+          </span>
+          <span className="settings-field-sub">{l(
+            "Off by default. A script judge written as inline JavaScript always runs, sandboxed with only the case in scope; this allows the other kind, which spawns a command with your own privileges. While off, such a judge is reported as unscored instead of running.",
+            "默认关闭。写成内联 JavaScript 的脚本评判始终可用，只能看到当前用例，跑在沙箱里；此开关放开的是另一种——以你自己的权限启动外部命令。关闭时这类评判会记为未评分，而不是执行。",
+          )}</span>
+        </div>
+        <input
+          type="checkbox"
+          className="switch"
+          checked={Boolean(settings?.evalScriptCommandsEnabled)}
+          disabled={!settings || !enabled}
+          onChange={(event) => onSettingsChange({
+            evalScriptCommandsEnabled: event.currentTarget.checked,
+          })}
+        />
+      </label>
+
       {error ? <p className="settings-error" role="alert">{error}</p> : null}
     </section>
   );

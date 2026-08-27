@@ -8,24 +8,27 @@ import {
   scoreEvaluationRun,
   type EvaluationCaseScore,
   type EvaluationRunScore,
+  type EvaluationScoringConfig,
 } from "./graph/scorer";
 import type { EvaluationNodeRecord } from "./graph/node";
+import type { EvaluationGraphSpec } from "./graph/builder";
 import {
   AGENT_NODE_ID,
   buildEvaluationCaseGraph,
   SESSION_NODE_ID,
   SKILL_NODE_ID,
+  SOURCE_NODE_ID,
+  type EvaluationArtifactSourceKind,
   type EvaluationCasePlan,
   type EvaluationPlanEvaluator,
 } from "./case-graph";
-import type { EvaluationGraphSpec } from "./graph/builder";
 import type {
-  EvaluationExecutionValue,
+  EvaluationArtifactValue,
   EvaluationInstructionsValue,
   EvaluationNodeDependencies,
-  EvaluationSessionValue,
   EvaluationSkillInjection,
   EvaluationTaskValue,
+  EvaluationTrajectoryValue,
 } from "./nodes/contracts";
 
 /**
@@ -37,21 +40,25 @@ import type {
  */
 
 export interface EvaluationRunPlan {
+  /** Where each case's artifact comes from. */
+  source: EvaluationArtifactSourceKind;
   agentId: string;
   skillName: string | null;
   evaluators: readonly EvaluationPlanEvaluator[];
   cases: readonly EvaluationTaskValue[];
-  linkSessions: boolean;
+  /** Attach the session-link step to a fresh run so it gains a trajectory. */
+  linkTrajectory: boolean;
   sessionLink?: { attempts?: number; delayMs?: number };
-  /** Graph authored in the editor; replaces the derived shape when present. */
-  savedSpec?: EvaluationGraphSpec;
+  scoring?: EvaluationScoringConfig;
   /**
-   * Cases executed at once. Defaults to 1: a case spawns a real agent, and
-   * running several against one working directory is not something the runtimes
-   * promise to tolerate. Judges inside a case still run concurrently.
+   * Cases executed at once. Defaults to 1 when the source runs an agent, since a
+   * case then spawns a real agent and the runtimes do not promise to tolerate
+   * several at once in one working directory. Judging an artifact that already
+   * exists has no such constraint.
    */
   maxConcurrentCases?: number;
   maxConcurrentNodes?: number;
+  savedSpec?: EvaluationGraphSpec;
 }
 
 export interface EvaluationCaseOutcome {
@@ -59,11 +66,13 @@ export interface EvaluationCaseOutcome {
   task: EvaluationTaskValue;
   aggregate: EvaluationCaseAggregate;
   score: EvaluationCaseScore;
-  /** The agent's answer; empty when it never produced one. */
+  /** The artifact's answer text; empty when no artifact was produced. */
   output: string;
   durationMs: number;
   sessionKey?: string;
   skill?: EvaluationSkillInjection;
+  /** Evaluators this source could not judge, so their absence stays visible. */
+  skippedEvaluatorIds: string[];
   /** Why this case produced no score, when it produced none. */
   unscoredReason?: string;
   cancelled: boolean;
@@ -87,7 +96,10 @@ export async function executeEvaluationRun(
   dependencies: EvaluationNodeDependencies,
   options: EvaluationRunOptions = {},
 ): Promise<EvaluationRunOutcome> {
-  const maxConcurrentCases = Math.max(1, plan.maxConcurrentCases ?? 1);
+  const maxConcurrentCases = Math.max(
+    1,
+    plan.maxConcurrentCases ?? (plan.source === "run_agent" ? 1 : 4),
+  );
   const outcomes = new Map<string, EvaluationCaseOutcome>();
   const queue = [...plan.cases];
   let cancelled = options.signal?.aborted === true;
@@ -131,14 +143,15 @@ async function runCase(
 ): Promise<EvaluationCaseOutcome> {
   const casePlan: EvaluationCasePlan = {
     task,
+    source: plan.source,
     agentId: plan.agentId,
     skillName: plan.skillName,
     evaluators: plan.evaluators,
-    linkSessions: plan.linkSessions,
+    linkTrajectory: plan.linkTrajectory,
     ...(plan.sessionLink ? { sessionLink: plan.sessionLink } : {}),
     ...(plan.savedSpec ? { savedSpec: plan.savedSpec } : {}),
   };
-  const graph = buildEvaluationCaseGraph(casePlan, dependencies);
+  const { graph, skippedEvaluatorIds } = buildEvaluationCaseGraph(casePlan, dependencies);
   const execution = await executeEvaluationGraph({
     graph,
     caseId: task.caseId,
@@ -153,13 +166,9 @@ async function runCase(
   const aggregate = aggregateEvaluationCase(task.caseId, execution.records, {
     cancelled: execution.cancelled,
   });
-  const score = scoreEvaluationCase(aggregate);
-  const agentExecution = execution.values.get(AGENT_NODE_ID)?.get("execution") as
-    | EvaluationExecutionValue
-    | undefined;
-  const session = execution.values.get(SESSION_NODE_ID)?.get("session") as
-    | EvaluationSessionValue
-    | undefined;
+  const score = scoreEvaluationCase(aggregate, plan.scoring ?? {});
+  const artifact = firstValue<EvaluationArtifactValue>(execution.values, "artifact");
+  const trajectory = firstValue<EvaluationTrajectoryValue>(execution.values, "trajectory");
   const instructions = execution.values.get(SKILL_NODE_ID)?.get("instructions") as
     | EvaluationInstructionsValue
     | undefined;
@@ -169,10 +178,11 @@ async function runCase(
     task,
     aggregate,
     score,
-    output: agentExecution?.output ?? "",
-    durationMs: agentExecution?.durationMs ?? 0,
-    ...(session ? { sessionKey: session.sessionKey } : {}),
+    output: artifact?.output ?? "",
+    durationMs: artifact?.durationMs ?? trajectory?.durationMs ?? 0,
+    ...(trajectory?.sessionKey ? { sessionKey: trajectory.sessionKey } : {}),
     ...(instructions?.skill ? { skill: instructions.skill } : {}),
+    skippedEvaluatorIds,
     ...(score.score === null
       ? { unscoredReason: unscoredReason(execution.records, execution.cancelled) }
       : {}),
@@ -181,11 +191,33 @@ async function runCase(
 }
 
 /**
+ * Reads a port from whichever node produced it.
+ *
+ * The producing node differs by source — a fresh run yields the artifact from
+ * `agent`, a session or folder from `source` — and the caller only wants the
+ * value.
+ */
+function firstValue<T>(
+  values: Map<string, Map<string, unknown>>,
+  port: string,
+): T | undefined {
+  for (const nodeId of [AGENT_NODE_ID, SOURCE_NODE_ID, SESSION_NODE_ID]) {
+    const value = values.get(nodeId)?.get(port);
+    if (value !== undefined) return value as T;
+  }
+  for (const ports of values.values()) {
+    const value = ports.get(port);
+    if (value !== undefined) return value as T;
+  }
+  return undefined;
+}
+
+/**
  * Names the first thing that stopped this case from being scored.
  *
  * Nodes are inspected in graph order so the answer is the earliest cause rather
  * than the last symptom: a judge left `pending` is worth far less to a reader
- * than the agent failure that blocked it.
+ * than the source failure that blocked it.
  */
 function unscoredReason(
   records: readonly EvaluationNodeRecord[],

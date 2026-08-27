@@ -55,6 +55,11 @@ describe("PostgreSQL evaluation store graph records", () => {
       passRate: 0.5,
       scoredCaseCount: 2,
       unscoredCaseCount: 1,
+      coverage: 0.8,
+      dimensions: [
+        { dimension: "正确性", score: 0.75, weight: 4, scoredCaseCount: 2 },
+        { dimension: "格式", score: 1, weight: 1, scoredCaseCount: 2 },
+      ],
       totalDurationMs: 100,
       results: [
         {
@@ -67,10 +72,26 @@ describe("PostgreSQL evaluation store graph records", () => {
           output: "4",
           durationMs: 20,
           gatePassed: true,
+          score: 0.9,
+          passed: true,
+          coverage: 0.5,
+          dimensions: [
+            {
+              dimension: "正确性",
+              score: 0.9,
+              weight: 4,
+              decided: 1,
+              undecided: 0,
+              met: 1,
+              unmet: 0,
+            },
+          ],
+          byLabel: { dimension: { 正确性: 0.9 }, priority: { must: 0.9 } },
+          skippedEvaluatorIds: ["tool-failures"],
           sessionKey: "claude:thread-9",
           skillInjection: { skillName: "review", skillHash: "hash-1", contentLength: 42 },
           scores: [
-            { evaluatorId: "exact", score: 1, passed: true, durationMs: 1 },
+            { evaluatorId: "exact", score: 1, passed: true, dimension: "正确性", durationMs: 1 },
           ],
           nodes: [
             {
@@ -145,12 +166,23 @@ describe("PostgreSQL evaluation store graph records", () => {
       scoredCaseCount: 2,
       unscoredCaseCount: 1,
     });
+    // The dimension breakdown is the point of the score, so it has to survive a
+    // reload rather than only existing in the process that computed it.
+    expect(loaded!.coverage).toBeCloseTo(0.8);
+    expect(loaded!.dimensions).toEqual(graphRun().dimensions);
     const [result] = loaded!.results;
     expect(result).toMatchObject({
       sessionKey: "claude:thread-9",
       gatePassed: true,
       skillInjection: { skillName: "review", skillHash: "hash-1", contentLength: 42 },
+      score: 0.9,
+      passed: true,
+      coverage: 0.5,
+      byLabel: { dimension: { 正确性: 0.9 }, priority: { must: 0.9 } },
+      skippedEvaluatorIds: ["tool-failures"],
     });
+    expect(result!.dimensions).toEqual(graphRun().results[0]!.dimensions);
+    expect(result!.scores[0]!.dimension).toBe("正确性");
     expect(result!.nodes?.map((node) => node.nodeId)).toEqual([
       "agent",
       "session",
@@ -250,5 +282,82 @@ describe("PostgreSQL evaluation store graph records", () => {
     expect(loaded!.results[0]!.nodes).toBeUndefined();
     expect(loaded!.results[0]!.sessionKey).toBeUndefined();
     expect(loaded!.results[0]!.scores).toHaveLength(1);
+  });
+
+  it("round-trips a script evaluator's own settings", async () => {
+    // A script judge that lost its code on reload would silently stop judging,
+    // and the dimension it scores decides how its verdict is combined.
+    const now = Date.now();
+    await store.saveEvaluator({
+      id: "evaluator-script",
+      name: "answer length",
+      kind: "script",
+      threshold: 0.7,
+      enabled: true,
+      dimension: "简洁性",
+      priority: "should",
+      scriptMode: "command",
+      command: "/usr/bin/python3",
+      commandArgs: ["judge.py", "--strict"],
+      subject: "trajectory",
+      timeoutMs: 4_000,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const reloaded = (await store.listEvaluators()).find((item) => item.id === "evaluator-script");
+
+    expect(reloaded).toMatchObject({
+      kind: "script",
+      dimension: "简洁性",
+      priority: "should",
+      scriptMode: "command",
+      command: "/usr/bin/python3",
+      commandArgs: ["judge.py", "--strict"],
+      subject: "trajectory",
+      timeoutMs: 4_000,
+    });
+  });
+
+  it("round-trips the artifact source and scoring config of an experiment", async () => {
+    const target = (await store.listExperiments()).find((item) => item.id === "experiment-1")!;
+    await store.saveExperiment({
+      ...target,
+      source: "session",
+      scoring: {
+        weightByLabels: { dimension: { 正确性: 4 }, priority: { should: 0.5 } },
+        resolvedThreshold: 0.8,
+        minCoverage: 0.5,
+        uncertain: "zero",
+      },
+      updatedAt: Date.now(),
+    });
+
+    const reloaded = (await store.listExperiments()).find((item) => item.id === "experiment-1")!;
+
+    expect(reloaded.source).toBe("session");
+    expect(reloaded.scoring).toEqual({
+      weightByLabels: { dimension: { 正确性: 4 }, priority: { should: 0.5 } },
+      resolvedThreshold: 0.8,
+      minCoverage: 0.5,
+      uncertain: "zero",
+    });
+  });
+
+  it("keeps a tool-failure evaluator's budget", async () => {
+    const now = Date.now();
+    await store.saveEvaluator({
+      id: "evaluator-tools",
+      name: "tool failures",
+      kind: "tool_failures",
+      threshold: 1,
+      enabled: true,
+      maxToolFailures: 3,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    expect((await store.listEvaluators()).find((item) => item.id === "evaluator-tools"))
+      .toMatchObject({ kind: "tool_failures", maxToolFailures: 3 });
   });
 });

@@ -98,6 +98,15 @@ export function createAutomationApi(ipc: AutomationIpcRenderer) {
     listEvaluationDatasets: (): Promise<EvaluationDataset[]> => ipc.invoke(AUTOMATION_CHANNELS.evaluationDatasetList),
     saveEvaluationDataset: (dataset: EvaluationDataset): Promise<EvaluationDataset> => ipc.invoke(AUTOMATION_CHANNELS.evaluationDatasetSave, dataset),
     deleteEvaluationDataset: (datasetId: string): Promise<boolean> => ipc.invoke(AUTOMATION_CHANNELS.evaluationDatasetDelete, datasetId),
+    // The directory is chosen in a native dialog in the main process, so the
+    // renderer never names a filesystem path.
+    importEvaluationDatasetFolder: (): Promise<
+      { dataset: EvaluationDataset; directory: string; errors: string[] } | null
+    > => ipc.invoke(AUTOMATION_CHANNELS.evaluationDatasetFolderImport),
+    exportEvaluationDatasetFolder: (
+      datasetId: string,
+    ): Promise<{ directory: string; caseCount: number } | null> =>
+      ipc.invoke(AUTOMATION_CHANNELS.evaluationDatasetFolderExport, datasetId),
     listEvaluationEvaluators: (): Promise<EvaluationEvaluator[]> => ipc.invoke(AUTOMATION_CHANNELS.evaluationEvaluatorList),
     saveEvaluationEvaluator: (evaluator: EvaluationEvaluator): Promise<EvaluationEvaluator> => ipc.invoke(AUTOMATION_CHANNELS.evaluationEvaluatorSave, evaluator),
     deleteEvaluationEvaluator: (evaluatorId: string): Promise<boolean> => ipc.invoke(AUTOMATION_CHANNELS.evaluationEvaluatorDelete, evaluatorId),

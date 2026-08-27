@@ -105,7 +105,11 @@ export interface AutomationServiceOptions {
    */
   readEvaluationSkill?: EvaluationServiceDependencies["readSkill"];
   resolveEvaluationSession?: EvaluationServiceDependencies["resolveSession"];
-  readEvaluationTrace?: EvaluationServiceDependencies["readTrace"];
+  readEvaluationTrajectory?: EvaluationServiceDependencies["readTrajectory"];
+  readEvaluationSessionArtifact?: EvaluationServiceDependencies["readSessionArtifact"];
+  readEvaluationFolderArtifact?: EvaluationServiceDependencies["readFolderArtifact"];
+  runEvaluationJudgeScript?: EvaluationServiceDependencies["runJudgeScript"];
+  chooseEvaluationDatasetDirectory?: EvaluationServiceDependencies["chooseDatasetDirectory"];
 }
 
 interface AutomationServiceDependencies {
@@ -369,7 +373,21 @@ export class NativeAutomationService {
       ...(options.resolveEvaluationSession
         ? { resolveSession: options.resolveEvaluationSession }
         : {}),
-      ...(options.readEvaluationTrace ? { readTrace: options.readEvaluationTrace } : {}),
+      ...(options.readEvaluationTrajectory
+        ? { readTrajectory: options.readEvaluationTrajectory }
+        : {}),
+      ...(options.readEvaluationSessionArtifact
+        ? { readSessionArtifact: options.readEvaluationSessionArtifact }
+        : {}),
+      ...(options.readEvaluationFolderArtifact
+        ? { readFolderArtifact: options.readEvaluationFolderArtifact }
+        : {}),
+      ...(options.runEvaluationJudgeScript
+        ? { runJudgeScript: options.runEvaluationJudgeScript }
+        : {}),
+      ...(options.chooseEvaluationDatasetDirectory
+        ? { chooseDatasetDirectory: options.chooseEvaluationDatasetDirectory }
+        : {}),
     });
     this.teamChat = dependencies.teamChats ?? new TeamChatService({
       storeFactory: () => new PostgresTeamChatStore(options.database),

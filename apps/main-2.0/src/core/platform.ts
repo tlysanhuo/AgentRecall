@@ -142,6 +142,12 @@ export interface AppSettings {
   sessionSearchMcpEnabled: boolean;
   skillMcpEnabled: boolean;
   evalMcpEnabled: boolean;
+  /**
+   * Whether an evaluation script judge may spawn an external command. Inline JS
+   * judges run sandboxed and are always allowed; a command is a real process with
+   * the user's own privileges, so it stays off until it is turned on.
+   */
+  evalScriptCommandsEnabled: boolean;
   workflowMcpEnabled: boolean;
   workflowGlobalReviewEnabled: boolean;
   workflowRuntimeReviewEnabled: boolean;
@@ -229,6 +235,7 @@ export const defaultSettings: AppSettings = {
   sessionSearchMcpEnabled: true,
   skillMcpEnabled: true,
   evalMcpEnabled: false,
+  evalScriptCommandsEnabled: false,
   workflowMcpEnabled: false,
   workflowGlobalReviewEnabled: false,
   workflowRuntimeReviewEnabled: false,
@@ -259,6 +266,7 @@ export function mergeAppSettings(previous: AppSettings, updates: AppSettingsUpda
     migrationCompleteTokenLimit: normalizeMigrationCompleteTokenLimit(merged.migrationCompleteTokenLimit),
     autoCheckUpdates: Boolean(merged.autoCheckUpdates),
     evalEnabled: Boolean(merged.evalEnabled),
+    evalScriptCommandsEnabled: Boolean(merged.evalScriptCommandsEnabled),
     openVikingMemoryEnabled: Boolean(merged.openVikingMemoryEnabled),
     openVikingClaudeEnabled: Boolean(merged.openVikingClaudeEnabled),
     openVikingCodexEnabled: Boolean(merged.openVikingCodexEnabled),

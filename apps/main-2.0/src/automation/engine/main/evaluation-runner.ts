@@ -1,11 +1,11 @@
 import { executeEvaluationRun } from "../../../core/evaluation/run";
 import type { EvaluationPlanEvaluator } from "../../../core/evaluation/case-graph";
 import type {
-  EvaluationEvidenceValue,
-  EvaluationExecutionValue,
+  EvaluationArtifactFile,
+  EvaluationExecutionReference,
   EvaluationNodeDependencies,
-  EvaluationSessionValue,
   EvaluationTaskValue,
+  EvaluationTrajectoryValue,
 } from "../../../core/evaluation/nodes/contracts";
 import type { EvaluationCaseOutcome } from "../../../core/evaluation/run";
 import type {
@@ -20,10 +20,11 @@ import type {
 /**
  * Adapter between the stored experiment shape and the evaluation graph.
  *
- * The engine itself lives in `src/core/evaluation`; everything here is
- * translation: an experiment becomes a run plan, and each case outcome becomes
- * the case/score rows the store and the existing clients already understand,
- * plus the node records that explain how the case got there.
+ * The engine lives in `src/core/evaluation`; everything here is translation. An
+ * experiment becomes a run plan — which artifact source, which evaluators on
+ * which dimensions, which weights — and each case outcome becomes the rows the
+ * store and existing clients understand, plus the node records and dimension
+ * breakdown that explain how the score came about.
  */
 
 export type EvaluationExecutionRequest = {
@@ -32,7 +33,11 @@ export type EvaluationExecutionRequest = {
   developerInstructions?: string;
 };
 
-export type EvaluationExecutionResult = EvaluationExecutionValue;
+export interface EvaluationExecutionResult {
+  output: string;
+  durationMs: number;
+  executionReference?: EvaluationExecutionReference;
+}
 
 export interface RunEvaluationInput {
   experiment: EvaluationExperiment;
@@ -62,8 +67,16 @@ export interface RunEvaluationInput {
   /** Reads the SKILL.md bytes and hash of the skill this experiment injects. */
   readSkill?: (skillName: string) => Promise<{ content: string; hash: string } | null>;
   /** Resolves a runtime session id to the indexed AgentRecall session. */
-  resolveSession?: (rawId: string) => Promise<EvaluationSessionValue | null>;
-  readTrace?: (sessionKey: string) => Promise<EvaluationEvidenceValue | null>;
+  resolveSession?: (rawId: string) => Promise<{ sessionKey: string } | null>;
+  readTrajectory?: (sessionKey: string) => Promise<EvaluationTrajectoryValue | null>;
+  readSessionArtifact?: (
+    sessionKey: string,
+  ) => Promise<{ output: string; files?: EvaluationArtifactFile[] } | null>;
+  readFolderArtifact?: (
+    path: string,
+  ) => Promise<{ output: string; files?: EvaluationArtifactFile[] } | null>;
+  /** Runs a judge the user wrote. Absent means script judges excuse themselves. */
+  runJudgeScript?: EvaluationNodeDependencies["runJudgeScript"];
   wait?: (milliseconds: number) => Promise<void>;
 }
 
@@ -76,22 +89,22 @@ export async function runEvaluation(input: RunEvaluationInput): Promise<Evaluati
   const cases: EvaluationTaskValue[] = [];
   for (const item of input.dataset.items) {
     for (let repetition = 1; repetition <= repetitions; repetition += 1) {
+      const artifactRef = artifactRefOf(item.metadata);
       cases.push({
         caseId: `${runId}:${item.id}:${repetition}`,
         datasetItemId: item.id,
         repetition,
         input: item.input,
         ...(item.expectedOutput !== undefined ? { expectedOutput: item.expectedOutput } : {}),
-        ...(typeof item.metadata.context === "string"
-          ? { context: item.metadata.context }
-          : {}),
+        ...(typeof item.metadata.context === "string" ? { context: item.metadata.context } : {}),
+        ...(artifactRef ? { artifactRef } : {}),
         metadata: item.metadata,
       });
     }
   }
 
   const dependencies: EvaluationNodeDependencies = {
-    executeAgent: (request, signal) =>
+    runAgent: (request, signal) =>
       input.execute(
         {
           configuredAgentId: request.agentId,
@@ -110,7 +123,10 @@ export async function runEvaluation(input: RunEvaluationInput): Promise<Evaluati
       : {}),
     ...(input.readSkill ? { readSkill: input.readSkill } : {}),
     ...(input.resolveSession ? { resolveSession: input.resolveSession } : {}),
-    ...(input.readTrace ? { readTrace: input.readTrace } : {}),
+    ...(input.readTrajectory ? { readTrajectory: input.readTrajectory } : {}),
+    ...(input.readSessionArtifact ? { readSessionArtifact: input.readSessionArtifact } : {}),
+    ...(input.readFolderArtifact ? { readFolderArtifact: input.readFolderArtifact } : {}),
+    ...(input.runJudgeScript ? { runJudgeScript: input.runJudgeScript } : {}),
     ...(input.wait ? { wait: input.wait } : {}),
   };
 
@@ -136,14 +152,16 @@ export async function runEvaluation(input: RunEvaluationInput): Promise<Evaluati
 
   const outcome = await executeEvaluationRun(
     {
+      source: input.experiment.source ?? "run_agent",
       agentId: input.experiment.agentId,
       skillName: input.experiment.skillName ?? null,
       evaluators: planEvaluators(input.experiment, input.evaluators),
       cases,
-      // Session linkage costs a lookup and a bounded wait per case, so it only
-      // runs where the host actually wired both halves of it.
-      linkSessions: Boolean(input.resolveSession && input.readTrace),
+      // The trajectory half of a fresh run costs a lookup and a bounded wait, so
+      // it only runs where the host wired both readers.
+      linkTrajectory: Boolean(input.resolveSession && input.readTrajectory),
       sessionLink: { attempts: 6, delayMs: 500 },
+      ...(input.experiment.scoring ? { scoring: input.experiment.scoring } : {}),
       // An experiment with an authored graph runs that graph instead of the
       // derived shape; the runner only rewrites its per-case and evaluator config.
       ...(input.experiment.graph?.spec ? { savedSpec: input.experiment.graph.spec } : {}),
@@ -163,8 +181,10 @@ export async function runEvaluation(input: RunEvaluationInput): Promise<Evaluati
     ...(outcome.score.averageScore !== null ? { averageScore: outcome.score.averageScore } : {}),
     ...(outcome.score.minimumScore !== null ? { minimumScore: outcome.score.minimumScore } : {}),
     ...(outcome.score.passRate !== null ? { passRate: outcome.score.passRate } : {}),
+    ...(outcome.score.coverage !== null ? { coverage: outcome.score.coverage } : {}),
     scoredCaseCount: outcome.score.scoredCaseCount,
     unscoredCaseCount: outcome.score.unscoredCaseCount,
+    dimensions: outcome.score.dimensions,
   };
 
   const status: EvaluationRun["status"] = outcome.cancelled
@@ -180,25 +200,23 @@ interface EvaluationRunSnapshotScore {
   averageScore?: number;
   minimumScore?: number;
   passRate?: number;
+  coverage?: number;
   scoredCaseCount?: number;
   unscoredCaseCount?: number;
+  dimensions?: EvaluationRun["dimensions"];
 }
 
 /**
  * Score of the cases finished so far, so a polling client sees the run move.
- * Recomputed from case rows rather than accumulated, so a retried case cannot
- * be counted twice.
+ * Recomputed from case rows rather than accumulated, so a retried case cannot be
+ * counted twice.
  */
 function partialScore(results: readonly EvaluationCaseResult[]): EvaluationRunSnapshotScore {
   const scored = results.filter((result) => result.unscoredReason === undefined);
-  const values = scored.map((result) =>
-    result.scores.length > 0
-      ? result.scores.reduce((total, score) => total + score.score, 0) / result.scores.length
-      : 0,
-  );
-  const passed = scored.filter(
-    (result) => result.gatePassed !== false && result.scores.every((score) => score.passed),
-  ).length;
+  const values = scored
+    .map((result) => result.score)
+    .filter((value): value is number => typeof value === "number");
+  const passed = scored.filter((result) => result.passed === true).length;
   return {
     ...(values.length > 0
       ? {
@@ -224,9 +242,32 @@ function planEvaluators(
       id: evaluator.id,
       kind: evaluator.kind,
       threshold: evaluator.threshold,
+      ...(evaluator.dimension ? { dimension: evaluator.dimension } : {}),
+      ...(evaluator.priority ? { priority: evaluator.priority } : {}),
       ...(evaluator.runtimeId ? { runtimeId: evaluator.runtimeId } : {}),
       ...(evaluator.prompt ? { prompt: evaluator.prompt } : {}),
+      ...(evaluator.maxToolFailures !== undefined
+        ? { maxToolFailures: evaluator.maxToolFailures }
+        : {}),
+      ...(evaluator.scriptMode ? { scriptMode: evaluator.scriptMode } : {}),
+      ...(evaluator.script ? { script: evaluator.script } : {}),
+      ...(evaluator.command ? { command: evaluator.command } : {}),
+      ...(evaluator.commandArgs && evaluator.commandArgs.length > 0
+        ? { commandArgs: evaluator.commandArgs }
+        : {}),
+      ...(evaluator.subject ? { subject: evaluator.subject } : {}),
+      ...(evaluator.timeoutMs !== undefined ? { timeoutMs: evaluator.timeoutMs } : {}),
     }));
+}
+
+/** Dataset items point at an existing artifact through their metadata. */
+function artifactRefOf(
+  metadata: Record<string, unknown>,
+): { sessionKey?: string; path?: string } | undefined {
+  const sessionKey = typeof metadata.sessionKey === "string" ? metadata.sessionKey.trim() : "";
+  const path = typeof metadata.artifactPath === "string" ? metadata.artifactPath.trim() : "";
+  if (!sessionKey && !path) return undefined;
+  return { ...(sessionKey ? { sessionKey } : {}), ...(path ? { path } : {}) };
 }
 
 function caseResult(runId: string, outcome: EvaluationCaseOutcome): EvaluationCaseResult {
@@ -238,6 +279,7 @@ function caseResult(runId: string, outcome: EvaluationCaseOutcome): EvaluationCa
       evaluatorId: verdict.evaluatorId!,
       score: verdict.raw ?? 0,
       passed: verdict.status === "met",
+      ...(verdict.labels.dimension ? { dimension: verdict.labels.dimension } : {}),
       ...(verdict.reason ? { reason: verdict.reason } : {}),
       ...(verdict.evidence ? { evidence: verdict.evidence } : {}),
       ...(verdict.failedCriteria ? { failedCriteria: verdict.failedCriteria } : {}),
@@ -260,6 +302,14 @@ function caseResult(runId: string, outcome: EvaluationCaseOutcome): EvaluationCa
     durationMs: outcome.durationMs,
     scores,
     nodes: outcome.aggregate.nodes,
+    ...(outcome.score.score !== null ? { score: outcome.score.score } : {}),
+    passed: outcome.score.passed,
+    coverage: outcome.score.coverage,
+    dimensions: outcome.score.dimensions,
+    byLabel: outcome.score.byLabel,
+    ...(outcome.skippedEvaluatorIds.length > 0
+      ? { skippedEvaluatorIds: outcome.skippedEvaluatorIds }
+      : {}),
     ...(outcome.sessionKey ? { sessionKey: outcome.sessionKey } : {}),
     ...(outcome.skill ? { skillInjection: outcome.skill } : {}),
     ...(outcome.unscoredReason ? { unscoredReason: outcome.unscoredReason } : {}),

@@ -25,7 +25,7 @@ function authoredSpec(): EvaluationGraphSpec {
       { id: "skill", type: "skill_provision", config: {} },
       {
         id: "agent",
-        type: "agent_execute",
+        type: "run_agent",
         config: {},
         in: { task: "task.task", instructions: "skill.instructions" },
       },
@@ -33,7 +33,7 @@ function authoredSpec(): EvaluationGraphSpec {
         id: "judge",
         type: "llm_judge",
         config: { evaluatorId: "judge-1", threshold: 0.1, prompt: "stale", runtimeId: "stale" },
-        in: { task: "task.task", execution: "agent.execution" },
+        in: { task: "task.task", artifact: "agent.artifact" },
       },
     ],
   };
@@ -45,7 +45,7 @@ describe("evaluation node catalog", () => {
     const registry = createEvaluationValidationRegistry();
 
     expect(catalog).toHaveLength(registry.list().length);
-    const agent = catalog.find((entry) => entry.type === "agent_execute")!;
+    const agent = catalog.find((entry) => entry.type === "run_agent")!;
     expect(agent.role).toBe("prepare");
     // Ports come from the definition, so a palette cannot advertise one the
     // engine does not have.
@@ -53,7 +53,10 @@ describe("evaluation node catalog", () => {
       { name: "task", kind: "eval.task" },
       { name: "instructions", kind: "eval.instructions" },
     ]);
-    expect(agent.outputs).toEqual([{ name: "execution", kind: "eval.execution" }]);
+    expect(agent.outputs).toEqual([
+      { name: "artifact", kind: "eval.artifact" },
+      { name: "execution_ref", kind: "eval.execution_ref" },
+    ]);
     expect(agent.configFields.map((field) => field.key)).toEqual(["agentId"]);
 
     const judge = catalog.find((entry) => entry.type === "llm_judge")!;
@@ -77,7 +80,7 @@ describe("evaluation node catalog", () => {
               id: "judge",
               type: "llm_judge",
               config: { evaluatorId: "e", threshold: 1, prompt: "", runtimeId: "r" },
-              in: { task: "task.task", execution: "task.task" },
+              in: { task: "task.task", artifact: "task.task" },
             },
           ],
         },

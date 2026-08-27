@@ -14,11 +14,17 @@ import { localize, type LanguageMode } from "../../language";
 /**
  * Evaluator authoring.
  *
- * Kinds split into two groups that behave differently at run time: the
- * deterministic ones decide from the expected output alone, while an LLM judge
- * needs a Runtime channel and a rubric — and without that channel it cannot
- * decide at all, which the graph reports as unscored rather than as a zero. The
- * form says so where the choice is made.
+ * Kinds split into groups that behave differently at run time: the deterministic
+ * ones decide from the expected output alone, an LLM judge needs a Runtime
+ * channel and a rubric, and a script judge is code the user wrote. None of them
+ * can fail a case by breaking — a missing channel, a script that throws, a
+ * trajectory that never arrived all report as unscored rather than as a zero, and
+ * the form says so where the choice is made.
+ *
+ * Dimension and priority are asked for on every kind, because they decide how the
+ * verdict is combined: scores are averaged inside a dimension before dimensions
+ * are combined, so two checks sharing a dimension do not quietly double that
+ * dimension's say.
  */
 
 const KIND_LABELS: Record<EvaluatorKind, [string, string]> = {
@@ -26,6 +32,8 @@ const KIND_LABELS: Record<EvaluatorKind, [string, string]> = {
   contains: ["Contains", "包含"],
   json_valid: ["JSON valid", "JSON 合法性"],
   llm_judge: ["LLM judge", "模型评判"],
+  tool_failures: ["Tool failures", "工具失败"],
+  script: ["Script", "脚本评判"],
 };
 
 const KIND_HINTS: Record<EvaluatorKind, [string, string]> = {
@@ -42,9 +50,25 @@ const KIND_HINTS: Record<EvaluatorKind, [string, string]> = {
     "Needs a Runtime channel. Without one the case is unscored, not failed.",
     "需要 Runtime 通道；没有通道时该用例记为未评分，而不是不通过。",
   ],
+  tool_failures: [
+    "Judges the trajectory, so it needs a source that has one; a folder artifact does not.",
+    "判定轨迹，因此需要有轨迹的产物来源；产物文件夹没有轨迹。",
+  ],
+  script: [
+    "Your own code decides. A script that breaks is reported as unscored, never as a zero.",
+    "由你自己写的代码判定。脚本本身出错会记为未评分，不会算成 0 分。",
+  ],
 };
 
 const BUILTIN_PREFIX = "builtin-judge-";
+
+const INLINE_JUDGE_EXAMPLE = `// task / artifact / trajectory are in scope.
+// Return a score, or a list of scores to cover several dimensions at once.
+const answer = artifact.output.trim();
+return {
+  score: answer.length <= 200 ? 1 : 0,
+  reason: \`answer is \${answer.length} characters\`,
+};`;
 
 export function EvalEvaluatorsPage({
   language,
@@ -274,6 +298,34 @@ export function EvalEvaluatorsPage({
                   onChange={(event) => setDraft({ ...draft, threshold: Number(event.target.value) })}
                 />
               </label>
+              <div className="eval-editor-row">
+                <label className="eval-editor-field">
+                  <span>{l("Dimension", "维度")}</span>
+                  <input
+                    value={draft.dimension ?? ""}
+                    placeholder={l("defaults to this evaluator", "默认使用本评分器")}
+                    disabled={managed}
+                    onChange={(event) => setDraft({ ...draft, dimension: event.target.value })}
+                  />
+                </label>
+                <label className="eval-editor-field">
+                  <span>{l("Priority", "重要程度")}</span>
+                  <select
+                    value={draft.priority ?? ""}
+                    disabled={managed}
+                    onChange={(event) => setDraft({
+                      ...draft,
+                      priority: event.target.value === ""
+                        ? undefined
+                        : event.target.value as "must" | "should",
+                    })}
+                  >
+                    <option value="">{l("(unset)", "（未设置）")}</option>
+                    <option value="must">{l("must", "必须")}</option>
+                    <option value="should">{l("should", "应该")}</option>
+                  </select>
+                </label>
+              </div>
               <label className="eval-editor-field">
                 <input
                   type="checkbox"
@@ -283,6 +335,29 @@ export function EvalEvaluatorsPage({
                 />
                 <span>{l("Enabled", "启用")}</span>
               </label>
+              {draft.kind === "tool_failures" ? (
+                <label className="eval-editor-field">
+                  <span>{l("Tool failures tolerated", "容许的工具失败次数")}</span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={draft.maxToolFailures ?? 0}
+                    disabled={managed}
+                    onChange={(event) => setDraft({
+                      ...draft,
+                      maxToolFailures: Math.max(0, Number(event.target.value) || 0),
+                    })}
+                  />
+                </label>
+              ) : null}
+              {draft.kind === "script" ? (
+                <ScriptJudgeFields
+                  draft={draft}
+                  managed={managed}
+                  language={language}
+                  onChange={setDraft}
+                />
+              ) : null}
               {draft.kind === "llm_judge" ? (
                 <>
                   <label className="eval-editor-field">
@@ -341,5 +416,135 @@ export function EvalEvaluatorsPage({
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * The script judge's own form.
+ *
+ * The two modes are not interchangeable in what they may do, and the form says
+ * which is which: inline JS runs sandboxed with only the case in scope, while a
+ * command is a real process and stays behind a setting until it is turned on.
+ */
+function ScriptJudgeFields({
+  draft,
+  managed,
+  language,
+  onChange,
+}: {
+  draft: EvaluationEvaluator;
+  managed: boolean;
+  language: LanguageMode;
+  onChange: (next: EvaluationEvaluator) => void;
+}): ReactElement {
+  const l = (en: string, zh: string) => localize(language, en, zh);
+  const mode = draft.scriptMode ?? "inline_js";
+  return (
+    <>
+      <div className="eval-editor-row">
+        <label className="eval-editor-field">
+          <span>{l("How it runs", "运行方式")}</span>
+          <select
+            value={mode}
+            disabled={managed}
+            onChange={(event) => onChange({
+              ...draft,
+              scriptMode: event.target.value as "inline_js" | "command",
+            })}
+          >
+            <option value="inline_js">{l("Inline JavaScript (sandboxed)", "内联 JavaScript（沙箱）")}</option>
+            <option value="command">{l("External command", "外部命令")}</option>
+          </select>
+        </label>
+        <label className="eval-editor-field">
+          <span>{l("What it judges", "判定对象")}</span>
+          <select
+            value={draft.subject ?? "artifact"}
+            disabled={managed}
+            onChange={(event) => onChange({
+              ...draft,
+              subject: event.target.value as "artifact" | "trajectory",
+            })}
+          >
+            <option value="artifact">{l("The artifact", "产物")}</option>
+            <option value="trajectory">{l("The trajectory", "轨迹")}</option>
+          </select>
+        </label>
+        <label className="eval-editor-field">
+          <span>{l("Timeout (ms)", "超时（毫秒）")}</span>
+          <input
+            type="number"
+            min={100}
+            step={100}
+            value={draft.timeoutMs ?? (mode === "command" ? 30000 : 5000)}
+            disabled={managed}
+            onChange={(event) => onChange({
+              ...draft,
+              timeoutMs: Math.max(100, Number(event.target.value) || 0),
+            })}
+          />
+        </label>
+      </div>
+      {mode === "inline_js" ? (
+        <label className="eval-editor-field">
+          <span>
+            {l("Judge code", "评判代码")}
+            {" · "}
+            {l(
+              "task, artifact and trajectory are in scope; no filesystem, network or modules",
+              "作用域内有 task、artifact、trajectory；没有文件系统、网络和模块",
+            )}
+          </span>
+          <textarea
+            className="eval-code-input"
+            value={draft.script ?? ""}
+            rows={12}
+            spellCheck={false}
+            placeholder={INLINE_JUDGE_EXAMPLE}
+            disabled={managed}
+            onChange={(event) => onChange({ ...draft, script: event.target.value })}
+          />
+        </label>
+      ) : (
+        <>
+          <p className="eval-muted">
+            {l(
+              "The case arrives as JSON on stdin; print the verdict as JSON on stdout. A command only runs while external script judges are enabled in Settings.",
+              "用例以 JSON 从 stdin 进入，判定结果以 JSON 打印到 stdout。只有在设置里允许外部脚本评判时命令才会执行。",
+            )}
+          </p>
+          <div className="eval-editor-row">
+            <label className="eval-editor-field">
+              <span>{l("Command", "命令")}</span>
+              <input
+                value={draft.command ?? ""}
+                placeholder="/usr/bin/python3"
+                disabled={managed}
+                onChange={(event) => onChange({ ...draft, command: event.target.value })}
+              />
+            </label>
+            <label className="eval-editor-field">
+              <span>{l("Arguments", "参数")} · {l("one per line", "每行一个")}</span>
+              <textarea
+                value={(draft.commandArgs ?? []).join("\n")}
+                rows={3}
+                spellCheck={false}
+                disabled={managed}
+                onChange={(event) => onChange({
+                  ...draft,
+                  // Split on newlines rather than spaces: an argument may contain
+                  // a space, and quoting rules here would be a second thing to
+                  // learn for no benefit.
+                  commandArgs: event.target.value
+                    .split("\n")
+                    .map((line) => line.trim())
+                    .filter((line) => line.length > 0),
+                })}
+              />
+            </label>
+          </div>
+        </>
+      )}
+    </>
   );
 }

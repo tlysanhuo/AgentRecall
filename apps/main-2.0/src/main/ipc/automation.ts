@@ -112,13 +112,33 @@ const evaluationDatasetSchema = z.object({
 const evaluationEvaluatorSchema = z.object({
   id: idSchema,
   name: z.string().trim().min(1).max(200),
-  kind: z.enum(["contains", "exact_match", "json_valid", "llm_judge"]),
+  kind: z.enum(["contains", "exact_match", "json_valid", "llm_judge", "tool_failures", "script"]),
   prompt: z.string().max(500_000).optional(),
   runtimeId: idSchema.optional(),
   threshold: z.number().finite().min(0).max(1),
   enabled: z.boolean(),
+  // A dimension is free text because it is a label the user chooses; the scoring
+  // config weights whatever names come back.
+  dimension: z.string().trim().max(120).optional(),
+  priority: z.enum(["must", "should"]).optional(),
+  maxToolFailures: z.number().int().nonnegative().max(10_000).optional(),
+  scriptMode: z.enum(["inline_js", "command"]).optional(),
+  script: z.string().max(200_000).optional(),
+  command: z.string().trim().max(4_000).optional(),
+  commandArgs: z.array(z.string().max(4_000)).max(100).optional(),
+  subject: z.enum(["artifact", "trajectory"]).optional(),
+  timeoutMs: z.number().int().min(100).max(600_000).optional(),
   createdAt: timestampSchema,
   updatedAt: timestampSchema,
+}).strict();
+const evaluationScoringSchema = z.object({
+  weightByLabels: z.record(
+    z.string().max(120),
+    z.record(z.string().max(120), z.number().finite().min(0).max(1_000)),
+  ).optional(),
+  resolvedThreshold: z.number().finite().min(0).max(1).optional(),
+  minCoverage: z.number().finite().min(0).max(1).optional(),
+  uncertain: z.enum(["exclude", "zero"]).optional(),
 }).strict();
 const evaluationGraphBindingSchema = z.union([
   z.string().min(3).max(200),
@@ -153,6 +173,9 @@ const evaluationExperimentSchema = z.object({
   agentId: idSchema,
   evaluatorIds: z.array(idSchema).max(500),
   repetitions: z.number().int().min(1).max(5),
+  // Where each case's artifact comes from, and how its verdicts are combined.
+  source: z.enum(["run_agent", "session", "folder"]).optional(),
+  scoring: evaluationScoringSchema.nullish(),
   // Skill binding and the authored graph travel with the experiment, so an
   // experiment loaded from the store can be saved back without losing either.
   skillName: z.string().trim().max(200).nullish(),
@@ -351,6 +374,10 @@ export function registerAutomationIpc({
     service.evaluations.saveDataset(evaluationDatasetSchema.parse(value) as EvaluationDataset));
   ready(AUTOMATION_CHANNELS.evaluationDatasetDelete, (value: unknown) =>
     service.evaluations.deleteDataset(idSchema.parse(value)));
+  ready(AUTOMATION_CHANNELS.evaluationDatasetFolderImport, () =>
+    service.evaluations.importDatasetFolder());
+  ready(AUTOMATION_CHANNELS.evaluationDatasetFolderExport, (value: unknown) =>
+    service.evaluations.exportDatasetFolder(idSchema.parse(value)));
   ready(AUTOMATION_CHANNELS.evaluationEvaluatorList, () => service.evaluations.listEvaluators());
   ready(AUTOMATION_CHANNELS.evaluationEvaluatorSave, (value: unknown) =>
     service.evaluations.saveEvaluator(evaluationEvaluatorSchema.parse(value) as EvaluationEvaluator));

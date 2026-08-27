@@ -209,6 +209,12 @@ export function EvalGraphEditor({
       const saved = await window.sessionSearch.automation.saveEvaluationExperiment({
         ...experiment,
         graph,
+        // The canvas is the authority on what this experiment does, so the
+        // evaluator list and the artifact source are read back off it. Left
+        // alone, a judge added here would be disabled at run time for not being
+        // in a list the editor never showed.
+        evaluatorIds: referencedEvaluatorIds(nodes),
+        source: sourceOfNodes(nodes),
         updatedAt: Date.now(),
       });
       onSaved(saved);
@@ -471,6 +477,34 @@ function configSummary(
   return parts.join(" · ");
 }
 
+/** Evaluators the canvas actually judges with, in canvas order. */
+function referencedEvaluatorIds(nodes: readonly EditorNode[]): string[] {
+  const ids: string[] = [];
+  for (const node of nodes) {
+    if (!node.enabled) continue;
+    const evaluatorId = node.config.evaluatorId;
+    if (typeof evaluatorId === "string" && evaluatorId.trim() && !ids.includes(evaluatorId)) {
+      ids.push(evaluatorId);
+    }
+  }
+  return ids;
+}
+
+/**
+ * The artifact source the canvas describes, read from its head node.
+ *
+ * Kept in step with the graph rather than asked for twice: the source decides how
+ * many cases may run at once and whether a trajectory is even possible, and a
+ * stored value that disagreed with the graph would be silently wrong.
+ */
+function sourceOfNodes(
+  nodes: readonly EditorNode[],
+): NonNullable<EvaluationExperiment["source"]> {
+  if (nodes.some((node) => node.enabled && node.type === "session_artifact")) return "session";
+  if (nodes.some((node) => node.enabled && node.type === "folder_artifact")) return "folder";
+  return "run_agent";
+}
+
 /**
  * Starts from the shape the runner would derive, so a first edit begins from a
  * graph that already works rather than an empty canvas.
@@ -488,11 +522,12 @@ function seedNodes(
       input: "",
       metadata: {},
     },
+    source: experiment.source ?? "run_agent",
     agentId: experiment.agentId,
     skillName: experiment.skillName ?? null,
     evaluators: [],
-    linkSessions: true,
-  });
+    linkTrajectory: true,
+  }).spec;
   const layout = experiment.graph?.layout ?? autoLayout(spec, registry);
   return spec.nodes.map((node, index) => ({
     id: node.id,

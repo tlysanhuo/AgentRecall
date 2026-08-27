@@ -1,12 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
   createLlmJudgeNode,
+  createScriptJudgeNode,
+  createScriptTrajectoryJudgeNode,
   deterministicJudgeNode,
   renderEvaluationPrompt,
   type DeterministicJudgeConfig,
   type LlmJudgeConfig,
+  type ScriptJudgeConfig,
 } from "./judge-nodes";
-import type { EvaluationExecutionValue, EvaluationTaskValue } from "./contracts";
+import type {
+  EvaluationArtifactValue,
+  EvaluationJudgeScriptInput,
+  EvaluationJudgeScriptVerdict,
+  EvaluationTaskValue,
+  EvaluationTrajectoryValue,
+} from "./contracts";
 import type { EvaluationNodeResult } from "../graph/node";
 
 function task(overrides: Partial<EvaluationTaskValue> = {}): EvaluationTaskValue {
@@ -20,13 +29,13 @@ function task(overrides: Partial<EvaluationTaskValue> = {}): EvaluationTaskValue
   };
 }
 
-function execution(output: string): EvaluationExecutionValue {
-  return { output, durationMs: 12 };
+function artifact(output: string): EvaluationArtifactValue {
+  return { output, origin: { kind: "agent_run" }, durationMs: 12 };
 }
 
 function runDeterministic(
   config: DeterministicJudgeConfig,
-  inputs: { task: EvaluationTaskValue; execution: EvaluationExecutionValue },
+  inputs: { task: EvaluationTaskValue; artifact: EvaluationArtifactValue },
 ): Promise<EvaluationNodeResult> {
   return deterministicJudgeNode.run({
     nodeId: "judge-1",
@@ -40,7 +49,7 @@ function runDeterministic(
 
 function runLlmJudge(
   config: LlmJudgeConfig,
-  inputs: { task: EvaluationTaskValue; execution: EvaluationExecutionValue },
+  inputs: { task: EvaluationTaskValue; artifact: EvaluationArtifactValue },
   executeJudge?: (
     input: { runtimeId: string; prompt: string },
   ) => Promise<{ output: string; durationMs: number }>,
@@ -60,7 +69,7 @@ describe("deterministic judge", () => {
   it("decides an exact match against the expected output", async () => {
     const result = await runDeterministic(
       { evaluatorId: "exact", kind: "exact_match", threshold: 1 },
-      { task: task({ expectedOutput: " 4 " }), execution: execution("4") },
+      { task: task({ expectedOutput: " 4 " }), artifact: artifact("4") },
     );
 
     expect(result.status).toBe("pass");
@@ -75,7 +84,7 @@ describe("deterministic judge", () => {
   it("marks a mismatch unmet", async () => {
     const result = await runDeterministic(
       { evaluatorId: "exact", kind: "exact_match", threshold: 1 },
-      { task: task({ expectedOutput: "4" }), execution: execution("five") },
+      { task: task({ expectedOutput: "4" }), artifact: artifact("five") },
     );
 
     expect(result.verdicts?.[0]).toMatchObject({ status: "unmet", raw: 0 });
@@ -85,7 +94,7 @@ describe("deterministic judge", () => {
     // Deciding "unmet" here would grade the dataset rather than the agent.
     const result = await runDeterministic(
       { evaluatorId: "exact", kind: "exact_match", threshold: 1 },
-      { task: task(), execution: execution("4") },
+      { task: task(), artifact: artifact("4") },
     );
 
     expect(result.status).toBe("excused");
@@ -99,14 +108,14 @@ describe("deterministic judge", () => {
     await expect(
       runDeterministic(
         { evaluatorId: "json", kind: "json_valid", threshold: 1 },
-        { task: task(), execution: execution('{"answer":4}') },
+        { task: task(), artifact: artifact('{"answer":4}') },
       ),
     ).resolves.toMatchObject({ status: "pass", verdicts: [{ status: "met" }] });
 
     await expect(
       runDeterministic(
         { evaluatorId: "json", kind: "json_valid", threshold: 1 },
-        { task: task(), execution: execution("not json") },
+        { task: task(), artifact: artifact("not json") },
       ),
     ).resolves.toMatchObject({ status: "pass", verdicts: [{ status: "unmet" }] });
   });
@@ -114,7 +123,7 @@ describe("deterministic judge", () => {
   it("honours a threshold below one for a substring check", async () => {
     const result = await runDeterministic(
       { evaluatorId: "contains", kind: "contains", threshold: 0.5 },
-      { task: task({ expectedOutput: "4" }), execution: execution("the answer is 4") },
+      { task: task({ expectedOutput: "4" }), artifact: artifact("the answer is 4") },
     );
 
     expect(result.verdicts?.[0]).toMatchObject({ status: "met", threshold: 0.5 });
@@ -126,7 +135,7 @@ describe("LLM judge", () => {
     const prompts: string[] = [];
     const result = await runLlmJudge(
       { evaluatorId: "judge", runtimeId: "claude", prompt: "Judge {{output}}", threshold: 0.6 },
-      { task: task({ expectedOutput: "4" }), execution: execution("4") },
+      { task: task({ expectedOutput: "4" }), artifact: artifact("4") },
       async ({ prompt }) => {
         prompts.push(prompt);
         return {
@@ -153,7 +162,7 @@ describe("LLM judge", () => {
   it("marks a low score unmet without excusing the judge", async () => {
     const result = await runLlmJudge(
       { evaluatorId: "judge", runtimeId: "claude", prompt: "", threshold: 0.6 },
-      { task: task(), execution: execution("wrong") },
+      { task: task(), artifact: artifact("wrong") },
       async () => ({ output: '{"score": 0.1, "reason": "off topic"}', durationMs: 5 }),
     );
 
@@ -164,7 +173,7 @@ describe("LLM judge", () => {
   it("excuses a missing runtime instead of scoring the agent zero", async () => {
     const result = await runLlmJudge(
       { evaluatorId: "judge", runtimeId: "  ", prompt: "", threshold: 0.6 },
-      { task: task(), execution: execution("4") },
+      { task: task(), artifact: artifact("4") },
       async () => ({ output: '{"score": 1}', durationMs: 1 }),
     );
 
@@ -178,7 +187,7 @@ describe("LLM judge", () => {
   it("excuses an unavailable judge executor", async () => {
     const result = await runLlmJudge(
       { evaluatorId: "judge", runtimeId: "claude", prompt: "", threshold: 0.6 },
-      { task: task(), execution: execution("4") },
+      { task: task(), artifact: artifact("4") },
     );
 
     expect(result).toMatchObject({
@@ -190,7 +199,7 @@ describe("LLM judge", () => {
   it("excuses a judge whose call threw", async () => {
     const result = await runLlmJudge(
       { evaluatorId: "judge", runtimeId: "claude", prompt: "", threshold: 0.6 },
-      { task: task(), execution: execution("4") },
+      { task: task(), artifact: artifact("4") },
       async () => {
         throw new Error("channel unreachable");
       },
@@ -205,7 +214,7 @@ describe("LLM judge", () => {
   it("excuses unparseable judge output rather than reading it as a zero", async () => {
     const result = await runLlmJudge(
       { evaluatorId: "judge", runtimeId: "claude", prompt: "", threshold: 0.6 },
-      { task: task(), execution: execution("4") },
+      { task: task(), artifact: artifact("4") },
       async () => ({ output: "I think it looks fine, honestly.", durationMs: 5 }),
     );
 
@@ -219,7 +228,7 @@ describe("LLM judge", () => {
   it("excuses judge output that carries no usable score", async () => {
     const result = await runLlmJudge(
       { evaluatorId: "judge", runtimeId: "claude", prompt: "", threshold: 0.6 },
-      { task: task(), execution: execution("4") },
+      { task: task(), artifact: artifact("4") },
       async () => ({ output: '{"reason": "cannot tell"}', durationMs: 5 }),
     );
 
@@ -232,7 +241,7 @@ describe("LLM judge", () => {
   it("clamps a score outside the unit range", async () => {
     const result = await runLlmJudge(
       { evaluatorId: "judge", runtimeId: "claude", prompt: "", threshold: 0.6 },
-      { task: task(), execution: execution("4") },
+      { task: task(), artifact: artifact("4") },
       async () => ({ output: '{"score": 7}', durationMs: 5 }),
     );
 
@@ -243,7 +252,7 @@ describe("LLM judge", () => {
     let seen = "";
     await runLlmJudge(
       { evaluatorId: "judge", runtimeId: "claude", prompt: "Be strict.", threshold: 0.6 },
-      { task: task({ expectedOutput: "4", context: "arithmetic" }), execution: execution("4") },
+      { task: task({ expectedOutput: "4", context: "arithmetic" }), artifact: artifact("4") },
       async ({ prompt }) => {
         seen = prompt;
         return { output: '{"score": 1}', durationMs: 1 };
@@ -265,5 +274,165 @@ describe("renderEvaluationPrompt", () => {
         output: "out",
       }),
     ).toBe("in / out / (not provided) / (not provided)");
+  });
+});
+
+function trajectory(
+  overrides: Partial<EvaluationTrajectoryValue> = {},
+): EvaluationTrajectoryValue {
+  return {
+    turnCount: 4,
+    toolCallCount: 6,
+    toolFailureCount: 0,
+    failedToolNames: [],
+    totalTokens: 900,
+    errorCount: 0,
+    usedSkillNames: [],
+    skillUsageObservable: true,
+    ...overrides,
+  };
+}
+
+function scriptConfig(overrides: Partial<ScriptJudgeConfig> = {}): ScriptJudgeConfig {
+  return {
+    evaluatorId: "my-check",
+    threshold: 0.6,
+    script: { mode: "inline_js", source: "return 1;" },
+    ...overrides,
+  };
+}
+
+function runScriptJudge(
+  config: ScriptJudgeConfig,
+  runJudgeScript?: (
+    input: EvaluationJudgeScriptInput,
+  ) => Promise<{ verdicts: EvaluationJudgeScriptVerdict[]; durationMs: number }>,
+): Promise<EvaluationNodeResult> {
+  const node = createScriptJudgeNode(runJudgeScript ? { runJudgeScript } : {});
+  return node.run({
+    nodeId: "judge-script",
+    nodeType: node.type,
+    caseId: "case-1",
+    config,
+    in: { task: task({ expectedOutput: "4" }), artifact: artifact("4") },
+    signal: new AbortController().signal,
+  });
+}
+
+describe("script judge", () => {
+  it("turns the script's verdict into a decision on its dimension", async () => {
+    const result = await runScriptJudge(
+      scriptConfig({ dimension: "格式", priority: "must" }),
+      async () => ({ verdicts: [{ score: 0.8, reason: "shape is right" }], durationMs: 7 }),
+    );
+
+    expect(result.status).toBe("pass");
+    expect(result.verdicts).toEqual([{
+      verdictId: "judge-script:my-check",
+      evaluatorId: "my-check",
+      labels: { dimension: "格式", evaluator: "script", priority: "must" },
+      status: "met",
+      raw: 0.8,
+      threshold: 0.6,
+      reason: "shape is right",
+      durationMs: 7,
+    }]);
+  });
+
+  it("hands the script the task and the artifact it is judging", async () => {
+    const seen: EvaluationJudgeScriptInput[] = [];
+    await runScriptJudge(scriptConfig(), async (input) => {
+      seen.push(input);
+      return { verdicts: [{ score: 1 }], durationMs: 1 };
+    });
+
+    expect(seen[0]!.task.expectedOutput).toBe("4");
+    expect(seen[0]!.artifact!.output).toBe("4");
+    expect(seen[0]!.script).toEqual({ mode: "inline_js", source: "return 1;" });
+  });
+
+  it("records one verdict per dimension the script returned", async () => {
+    const result = await runScriptJudge(scriptConfig(), async () => ({
+      verdicts: [
+        { score: 1, dimension: "正确性" },
+        { score: 0.2, dimension: "简洁性" },
+      ],
+      durationMs: 3,
+    }));
+
+    expect(result.verdicts?.map((verdict) => [verdict.verdictId, verdict.labels.dimension, verdict.status]))
+      .toEqual([
+        ["judge-script:my-check:正确性", "正确性", "met"],
+        ["judge-script:my-check:简洁性", "简洁性", "unmet"],
+      ]);
+  });
+
+  it("excuses itself when the script fails instead of scoring the agent zero", async () => {
+    // This is the whole reason a script judge is allowed to reject: a broken
+    // rubric must not look like a wrong answer.
+    const result = await runScriptJudge(scriptConfig(), async () => {
+      throw new Error("script_timed_out_after_5000ms");
+    });
+
+    expect(result.status).toBe("excused");
+    expect(result).toMatchObject({
+      attribution: { type: "judge_failure", reason: "script_timed_out_after_5000ms" },
+    });
+    expect(result.verdicts).toBeUndefined();
+  });
+
+  it("excuses itself when the script decided nothing", async () => {
+    const result = await runScriptJudge(
+      scriptConfig(),
+      async () => ({ verdicts: [], durationMs: 1 }),
+    );
+
+    expect(result.status).toBe("excused");
+    expect(result).toMatchObject({
+      attribution: { type: "judge_failure", reason: "script_returned_no_verdict" },
+    });
+  });
+
+  it("excuses itself when the host cannot run scripts at all", async () => {
+    const result = await runScriptJudge(scriptConfig());
+
+    expect(result.status).toBe("excused");
+    expect(result).toMatchObject({
+      attribution: { type: "infra_failure", reason: "script_runner_unavailable" },
+    });
+  });
+
+  it("clamps a score the script put out of range", async () => {
+    const result = await runScriptJudge(
+      scriptConfig(),
+      async () => ({ verdicts: [{ score: 4 }], durationMs: 1 }),
+    );
+
+    expect(result.verdicts?.[0]!.raw).toBe(1);
+  });
+});
+
+describe("script trajectory judge", () => {
+  it("judges how the work was done, not what came out", async () => {
+    const seen: EvaluationJudgeScriptInput[] = [];
+    const node = createScriptTrajectoryJudgeNode({
+      runJudgeScript: async (input) => {
+        seen.push(input);
+        return { verdicts: [{ score: 0.9, dimension: "效率" }], durationMs: 2 };
+      },
+    });
+
+    const result = await node.run({
+      nodeId: "judge-traj",
+      nodeType: node.type,
+      caseId: "case-1",
+      config: scriptConfig(),
+      in: { task: task(), trajectory: trajectory({ toolCallCount: 12 }) },
+      signal: new AbortController().signal,
+    });
+
+    expect(seen[0]!.trajectory!.toolCallCount).toBe(12);
+    expect(seen[0]!.artifact).toBeUndefined();
+    expect(result.verdicts?.[0]!.labels.dimension).toBe("效率");
   });
 });

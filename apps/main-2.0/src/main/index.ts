@@ -200,7 +200,11 @@ import { bootstrapApplicationPaths } from "./app-path-bootstrap";
 import { startPostgresRuntime, type PostgresRuntime } from "./postgres/managed-postgres";
 import { WORKFLOW_PORTABLE_MAX_BYTES } from "../automation/engine/main/hub/workflow/workflow-portable-file";
 import { writeWorkflowExportFileAtomically } from "./services/workflow-portable-filesystem";
-import type { EvaluationEvidenceValue } from "../core/evaluation/nodes/contracts";
+import type {
+  EvaluationArtifactFile,
+  EvaluationTrajectoryValue,
+} from "../core/evaluation/nodes/contracts";
+import { createJudgeScriptRunner } from "../core/evaluation/judge-script-runner";
 import type {
   EnvironmentUpsertInput,
   MigrationAgent,
@@ -526,14 +530,15 @@ function bundledSkillsPath(): string {
 }
 
 /**
- * Trajectory evidence for an evaluation case, read from the session its agent
- * execution produced.
+ * How an agent worked, read from the session it produced.
  *
  * `skillUsageObservable` is what keeps the skill-use observation honest: the
  * usage log only exists when the hook is installed, so without it an empty
  * trigger list means "unknown" rather than "the skill went unused".
  */
-async function readEvaluationTrace(sessionKey: string): Promise<EvaluationEvidenceValue | null> {
+async function readEvaluationTrajectory(
+  sessionKey: string,
+): Promise<EvaluationTrajectoryValue | null> {
   const session = await store.getSession(sessionKey);
   if (!session) return null;
   const [turns, traceEvents, usedSkillNames] = await Promise.all([
@@ -544,6 +549,7 @@ async function readEvaluationTrace(sessionKey: string): Promise<EvaluationEviden
   const toolResults = traceEvents.filter((event) => event.kind === "tool_result");
   const failedToolResults = toolResults.filter((event) => event.status === "failed");
   return {
+    sessionKey,
     turnCount: turns.length,
     toolCallCount: traceEvents.filter((event) => event.kind === "tool_call").length,
     toolFailureCount: failedToolResults.length,
@@ -557,6 +563,66 @@ async function readEvaluationTrace(sessionKey: string): Promise<EvaluationEviden
     usedSkillNames,
     skillUsageObservable: skillService.getUsageHookStatus(),
   };
+}
+
+/**
+ * The artifact of a session that already happened: its final answer.
+ *
+ * Evaluating a stored session is the cheap path — nothing is re-run, so a new
+ * rubric can be applied to work an agent did days ago.
+ */
+async function readEvaluationSessionArtifact(
+  sessionKey: string,
+): Promise<{ output: string; files?: EvaluationArtifactFile[] } | null> {
+  const session = await store.getSession(sessionKey);
+  if (!session) return null;
+  const messages = await store.getAllMessages(sessionKey);
+  const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
+  return { output: lastAssistant?.content ?? "" };
+}
+
+const ARTIFACT_OUTPUT_FILES = ["output.md", "answer.md", "OUTPUT.md", "ANSWER.md"];
+const ARTIFACT_MAX_FILES = 500;
+
+/**
+ * The artifact of a folder on disk: its files, plus a designated answer file when
+ * one is present. Without that file the artifact has no text, so a judge that
+ * needs one reports that it could not decide rather than scoring an empty string.
+ */
+async function readEvaluationFolderArtifact(
+  directory: string,
+): Promise<{ output: string; files?: EvaluationArtifactFile[] } | null> {
+  const root = path.resolve(directory);
+  try {
+    const stat = await fs.stat(root);
+    if (!stat.isDirectory()) return null;
+  } catch {
+    return null;
+  }
+  const files: EvaluationArtifactFile[] = [];
+  const walk = async (current: string): Promise<void> => {
+    if (files.length >= ARTIFACT_MAX_FILES) return;
+    for (const entry of await fs.readdir(current, { withFileTypes: true })) {
+      if (files.length >= ARTIFACT_MAX_FILES) return;
+      if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) await walk(entryPath);
+      else if (entry.isFile()) {
+        files.push({ path: path.relative(root, entryPath), status: "added" });
+      }
+    }
+  };
+  await walk(root);
+
+  let output = "";
+  for (const candidate of ARTIFACT_OUTPUT_FILES) {
+    const candidatePath = path.join(root, candidate);
+    if (files.some((file) => file.path === candidate)) {
+      output = await fs.readFile(candidatePath, "utf8");
+      break;
+    }
+  }
+  return { output, files };
 }
 
 function createAutomationService(): NativeAutomationService {
@@ -644,7 +710,16 @@ function createAutomationService(): NativeAutomationService {
         ? { sessionKey: session.sessionKey, source: session.source, rawId: session.rawId }
         : null;
     },
-    readEvaluationTrace: (sessionKey) => readEvaluationTrace(sessionKey),
+    readEvaluationTrajectory: (sessionKey) => readEvaluationTrajectory(sessionKey),
+    readEvaluationSessionArtifact: (sessionKey) => readEvaluationSessionArtifact(sessionKey),
+    readEvaluationFolderArtifact: (directory) => readEvaluationFolderArtifact(directory),
+    // Inline JS judges always run, sandboxed. A command judge is a real process,
+    // so it is read from the setting on every call rather than captured here.
+    chooseEvaluationDatasetDirectory: (mode) => chooseEvaluationDatasetDirectory(mode),
+    runEvaluationJudgeScript: createJudgeScriptRunner({
+      commandsEnabled: () => getSettings().evalScriptCommandsEnabled,
+      defaultCwd: app.getPath("userData"),
+    }),
     confirmWorkflowScriptPermissions: async ({ nodeTitle, permissions }) => {
       const result = mainWindow ? await dialog.showMessageBox(mainWindow, {
         type: "warning",
@@ -1036,6 +1111,22 @@ async function chooseProviderConfigDirectory(
     ...(defaultPath?.trim() ? { defaultPath: defaultPath.trim() } : {}),
   };
   const result = mainWindow ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
+  if (result.canceled) return null;
+  return result.filePaths[0] ?? null;
+}
+
+async function chooseEvaluationDatasetDirectory(
+  mode: "import" | "export",
+): Promise<string | null> {
+  const options: Electron.OpenDialogOptions = mode === "import"
+    ? { title: "Choose a dataset folder to import", properties: ["openDirectory"] }
+    : {
+        title: "Choose a folder to export the dataset into",
+        properties: ["openDirectory", "createDirectory"],
+      };
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options);
   if (result.canceled) return null;
   return result.filePaths[0] ?? null;
 }

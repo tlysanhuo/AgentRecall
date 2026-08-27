@@ -7,14 +7,16 @@ import {
 } from "./graph/builder";
 import type { AnyEvaluationNodeDefinition } from "./graph/node";
 import {
-  createAgentExecuteNode,
-  createEvidenceExtractNode,
+  createFolderArtifactNode,
+  createRunAgentNode,
+  createSessionArtifactNode,
   createSessionLinkNode,
   createSkillProvisionNode,
   skillUseObserveNode,
   taskSourceNode,
-  AGENT_EXECUTE_NODE_TYPE,
-  EVIDENCE_EXTRACT_NODE_TYPE,
+  FOLDER_ARTIFACT_NODE_TYPE,
+  RUN_AGENT_NODE_TYPE,
+  SESSION_ARTIFACT_NODE_TYPE,
   SESSION_LINK_NODE_TYPE,
   SKILL_PROVISION_NODE_TYPE,
   SKILL_USE_OBSERVE_NODE_TYPE,
@@ -22,14 +24,29 @@ import {
 } from "./nodes/prepare-nodes";
 import {
   createLlmJudgeNode,
+  createScriptJudgeNode,
+  createScriptTrajectoryJudgeNode,
   deterministicJudgeNode,
+  toolFailureJudgeNode,
   DETERMINISTIC_JUDGE_NODE_TYPE,
   LLM_JUDGE_NODE_TYPE,
+  SCRIPT_JUDGE_NODE_TYPE,
+  SCRIPT_TRAJECTORY_JUDGE_NODE_TYPE,
+  TOOL_FAILURE_JUDGE_NODE_TYPE,
 } from "./nodes/judge-nodes";
-import type { EvaluationNodeDependencies, EvaluationTaskValue } from "./nodes/contracts";
+import type {
+  EvaluationJudgeScript,
+  EvaluationNodeDependencies,
+  EvaluationTaskValue,
+} from "./nodes/contracts";
 
 /**
  * Assembles the graph for a single evaluation case.
+ *
+ * The head is an artifact source: run the agent now, read a session that already
+ * happened, or read a folder. Everything after it is evaluation, which is what
+ * makes a rubric change cheap — re-judging a session costs judge calls, not
+ * another agent run.
  *
  * One graph per case, so per-case data lives in node config and every case gets
  * an isolated set of records. Node ids are stable across runs of the same
@@ -40,29 +57,55 @@ export const TASK_NODE_ID = "task";
 export const SKILL_NODE_ID = "skill";
 export const AGENT_NODE_ID = "agent";
 export const SESSION_NODE_ID = "session";
-export const EVIDENCE_NODE_ID = "evidence";
+export const SOURCE_NODE_ID = "source";
 export const SKILL_USE_NODE_ID = "skill-use";
+
+/** Where the artifact under evaluation comes from. */
+export type EvaluationArtifactSourceKind = "run_agent" | "session" | "folder";
+
+export type EvaluationPlanEvaluatorKind =
+  | "exact_match"
+  | "contains"
+  | "json_valid"
+  | "llm_judge"
+  | "tool_failures"
+  | "script";
+
+/** What a judge decides on. Only a source with a session has a trajectory. */
+export type EvaluationJudgeSubject = "artifact" | "trajectory";
 
 export interface EvaluationPlanEvaluator {
   id: string;
-  kind: "exact_match" | "contains" | "json_valid" | "llm_judge";
+  kind: EvaluationPlanEvaluatorKind;
   threshold: number;
+  /** Dimension this evaluator scores. Defaults to its id. */
+  dimension?: string;
+  priority?: "must" | "should";
   runtimeId?: string;
   prompt?: string;
+  maxToolFailures?: number;
+  /** Only for `script`. */
+  scriptMode?: "inline_js" | "command";
+  script?: string;
+  command?: string;
+  commandArgs?: string[];
+  subject?: EvaluationJudgeSubject;
+  timeoutMs?: number;
 }
 
 export interface EvaluationCasePlan {
   task: EvaluationTaskValue;
+  source: EvaluationArtifactSourceKind;
   agentId: string;
   skillName: string | null;
   evaluators: readonly EvaluationPlanEvaluator[];
-  /** Add the session-link, evidence and skill-use observation nodes. */
-  linkSessions: boolean;
-  sessionLink?: { attempts?: number; delayMs?: number };
   /**
-   * A graph authored in the editor. When present it replaces the derived shape,
-   * and only the per-case and evaluator parts of its config are rewritten.
+   * Attach the session-link step so a fresh run gains a trajectory. Off leaves
+   * trajectory judges out of the graph rather than blocking on a link.
    */
+  linkTrajectory: boolean;
+  sessionLink?: { attempts?: number; delayMs?: number };
+  /** Graph authored in the editor; replaces the derived shape when present. */
   savedSpec?: EvaluationGraphSpec;
 }
 
@@ -72,101 +115,192 @@ export function createEvaluationNodeDefinitions(
   return [
     taskSourceNode,
     createSkillProvisionNode(dependencies),
-    createAgentExecuteNode(dependencies),
+    createRunAgentNode(dependencies),
     createSessionLinkNode(dependencies),
-    createEvidenceExtractNode(dependencies),
+    createSessionArtifactNode(dependencies),
+    createFolderArtifactNode(dependencies),
     skillUseObserveNode,
     deterministicJudgeNode,
     createLlmJudgeNode(dependencies),
+    toolFailureJudgeNode,
+    createScriptJudgeNode(dependencies),
+    createScriptTrajectoryJudgeNode(dependencies),
   ];
 }
 
-export function buildEvaluationCaseSpec(plan: EvaluationCasePlan): EvaluationGraphSpec {
+/** True when this evaluator decides on the trajectory rather than the artifact. */
+export function judgesTrajectory(evaluator: EvaluationPlanEvaluator): boolean {
+  if (evaluator.kind === "tool_failures") return true;
+  return evaluator.kind === "script" && evaluator.subject === "trajectory";
+}
+
+export interface EvaluationCaseSpecResult {
+  spec: EvaluationGraphSpec;
+  /**
+   * Evaluators left out because this source has no trajectory to judge. Reported
+   * so an omission is visible rather than looking like a passing run.
+   */
+  skippedEvaluatorIds: string[];
+}
+
+export function buildEvaluationCaseSpec(plan: EvaluationCasePlan): EvaluationCaseSpecResult {
   const nodes: EvaluationGraphNodeSpec[] = [
     { id: TASK_NODE_ID, type: TASK_SOURCE_NODE_TYPE, config: plan.task },
-    {
-      id: SKILL_NODE_ID,
-      type: SKILL_PROVISION_NODE_TYPE,
-      config: { skillName: plan.skillName },
-    },
-    {
-      id: AGENT_NODE_ID,
-      type: AGENT_EXECUTE_NODE_TYPE,
-      config: { agentId: plan.agentId },
-      in: { task: `${TASK_NODE_ID}.task`, instructions: `${SKILL_NODE_ID}.instructions` },
-    },
   ];
+  let artifactNodeId: string;
+  let trajectoryNodeId: string | null = null;
 
-  if (plan.linkSessions) {
+  if (plan.source === "run_agent") {
     nodes.push(
+      { id: SKILL_NODE_ID, type: SKILL_PROVISION_NODE_TYPE, config: { skillName: plan.skillName } },
       {
-        id: SESSION_NODE_ID,
-        type: SESSION_LINK_NODE_TYPE,
-        config: plan.sessionLink ?? {},
-        in: { execution: `${AGENT_NODE_ID}.execution` },
-      },
-      {
-        id: EVIDENCE_NODE_ID,
-        type: EVIDENCE_EXTRACT_NODE_TYPE,
-        in: { session: `${SESSION_NODE_ID}.session` },
-      },
-      {
-        id: SKILL_USE_NODE_ID,
-        type: SKILL_USE_OBSERVE_NODE_TYPE,
-        in: {
-          instructions: `${SKILL_NODE_ID}.instructions`,
-          evidence: `${EVIDENCE_NODE_ID}.evidence`,
-        },
+        id: AGENT_NODE_ID,
+        type: RUN_AGENT_NODE_TYPE,
+        config: { agentId: plan.agentId },
+        in: { task: `${TASK_NODE_ID}.task`, instructions: `${SKILL_NODE_ID}.instructions` },
       },
     );
+    artifactNodeId = AGENT_NODE_ID;
+    if (plan.linkTrajectory) {
+      nodes.push(
+        {
+          id: SESSION_NODE_ID,
+          type: SESSION_LINK_NODE_TYPE,
+          config: plan.sessionLink ?? {},
+          in: { execution_ref: `${AGENT_NODE_ID}.execution_ref` },
+        },
+        {
+          id: SKILL_USE_NODE_ID,
+          type: SKILL_USE_OBSERVE_NODE_TYPE,
+          in: {
+            instructions: `${SKILL_NODE_ID}.instructions`,
+            trajectory: `${SESSION_NODE_ID}.trajectory`,
+          },
+        },
+      );
+      trajectoryNodeId = SESSION_NODE_ID;
+    }
+  } else if (plan.source === "session") {
+    nodes.push({
+      id: SOURCE_NODE_ID,
+      type: SESSION_ARTIFACT_NODE_TYPE,
+      in: { task: `${TASK_NODE_ID}.task` },
+    });
+    artifactNodeId = SOURCE_NODE_ID;
+    trajectoryNodeId = SOURCE_NODE_ID;
+  } else {
+    nodes.push({
+      id: SOURCE_NODE_ID,
+      type: FOLDER_ARTIFACT_NODE_TYPE,
+      in: { task: `${TASK_NODE_ID}.task` },
+    });
+    artifactNodeId = SOURCE_NODE_ID;
   }
 
   const usedIds = new Set(nodes.map((node) => node.id));
+  const skippedEvaluatorIds: string[] = [];
   for (const evaluator of plan.evaluators) {
+    if (judgesTrajectory(evaluator) && !trajectoryNodeId) {
+      skippedEvaluatorIds.push(evaluator.id);
+      continue;
+    }
     const id = evaluatorNodeId(evaluator.id, usedIds);
     usedIds.add(id);
-    nodes.push(
-      evaluator.kind === "llm_judge"
-        ? {
-            id,
-            type: LLM_JUDGE_NODE_TYPE,
-            config: {
-              evaluatorId: evaluator.id,
-              runtimeId: evaluator.runtimeId ?? "",
-              prompt: evaluator.prompt ?? "",
-              threshold: evaluator.threshold,
-            },
-            in: {
-              task: `${TASK_NODE_ID}.task`,
-              execution: `${AGENT_NODE_ID}.execution`,
-            },
-          }
-        : {
-            id,
-            type: DETERMINISTIC_JUDGE_NODE_TYPE,
-            config: {
-              evaluatorId: evaluator.id,
-              kind: evaluator.kind,
-              threshold: evaluator.threshold,
-            },
-            in: {
-              task: `${TASK_NODE_ID}.task`,
-              execution: `${AGENT_NODE_ID}.execution`,
-            },
-          },
-    );
+    nodes.push(judgeNodeSpec(id, evaluator, artifactNodeId, trajectoryNodeId));
   }
 
-  return { name: `evaluation-case:${plan.task.caseId}`, version: 1, nodes };
+  return {
+    spec: { name: `evaluation-case:${plan.task.caseId}`, version: 1, nodes },
+    skippedEvaluatorIds,
+  };
+}
+
+/** Node type and config for an evaluator, independent of how it is wired. */
+export function judgeNodeType(evaluator: EvaluationPlanEvaluator): string {
+  if (evaluator.kind === "tool_failures") return TOOL_FAILURE_JUDGE_NODE_TYPE;
+  if (evaluator.kind === "llm_judge") return LLM_JUDGE_NODE_TYPE;
+  if (evaluator.kind === "script") {
+    return evaluator.subject === "trajectory"
+      ? SCRIPT_TRAJECTORY_JUDGE_NODE_TYPE
+      : SCRIPT_JUDGE_NODE_TYPE;
+  }
+  return DETERMINISTIC_JUDGE_NODE_TYPE;
+}
+
+/** The script an evaluator runs, in the shape the node and the runner expect. */
+export function evaluatorJudgeScript(
+  evaluator: EvaluationPlanEvaluator,
+): EvaluationJudgeScript {
+  if (evaluator.scriptMode === "command") {
+    return {
+      mode: "command",
+      command: evaluator.command ?? "",
+      ...(evaluator.commandArgs && evaluator.commandArgs.length > 0
+        ? { args: evaluator.commandArgs }
+        : {}),
+      ...(evaluator.timeoutMs !== undefined ? { timeoutMs: evaluator.timeoutMs } : {}),
+    };
+  }
+  return {
+    mode: "inline_js",
+    source: evaluator.script ?? "",
+    ...(evaluator.timeoutMs !== undefined ? { timeoutMs: evaluator.timeoutMs } : {}),
+  };
+}
+
+export function judgeNodeConfig(evaluator: EvaluationPlanEvaluator): Record<string, unknown> {
+  const shared = {
+    evaluatorId: evaluator.id,
+    threshold: evaluator.threshold,
+    ...(evaluator.dimension ? { dimension: evaluator.dimension } : {}),
+    ...(evaluator.priority ? { priority: evaluator.priority } : {}),
+  };
+  if (evaluator.kind === "tool_failures") {
+    return {
+      ...shared,
+      ...(evaluator.maxToolFailures !== undefined
+        ? { maxToolFailures: evaluator.maxToolFailures }
+        : {}),
+    };
+  }
+  if (evaluator.kind === "llm_judge") {
+    return { ...shared, runtimeId: evaluator.runtimeId ?? "", prompt: evaluator.prompt ?? "" };
+  }
+  if (evaluator.kind === "script") {
+    return { ...shared, script: evaluatorJudgeScript(evaluator) };
+  }
+  return { ...shared, kind: evaluator.kind };
+}
+
+function judgeNodeSpec(
+  id: string,
+  evaluator: EvaluationPlanEvaluator,
+  artifactNodeId: string,
+  trajectoryNodeId: string | null,
+): EvaluationGraphNodeSpec {
+  return {
+    id,
+    type: judgeNodeType(evaluator),
+    config: judgeNodeConfig(evaluator),
+    in: judgesTrajectory(evaluator)
+      ? {
+          trajectory: `${trajectoryNodeId}.trajectory`,
+          // A script judging the trajectory still compares it against the task;
+          // the built-in tool-failure judge has no use for it.
+          ...(evaluator.kind === "script" ? { task: `${TASK_NODE_ID}.task` } : {}),
+        }
+      : { task: `${TASK_NODE_ID}.task`, artifact: `${artifactNodeId}.artifact` },
+  };
 }
 
 /**
  * Rewrites a saved graph for one case.
  *
- * Three things a stored graph must not freeze: the case (the task node's config
- * *is* the case), the target agent, and an evaluator's settings. Hydrating them
- * at run time means editing a threshold or a judge prompt takes effect on the
- * next run instead of silently keeping whatever the graph was saved with.
+ * Four things a stored graph must not freeze: the case (the task node's config
+ * *is* the case), the target agent, the injected skill, and an evaluator's
+ * settings. Hydrating them at run time means editing a threshold, a weight or a
+ * judge prompt takes effect on the next run instead of silently keeping whatever
+ * the graph was saved with.
  */
 export function hydrateEvaluationCaseSpec(
   saved: EvaluationGraphSpec,
@@ -182,10 +316,8 @@ export function hydrateEvaluationCaseSpec(
     ...saved,
     nodes: saved.nodes.map((node) => {
       const config = (node.config ?? {}) as Record<string, unknown>;
-      if (node.type === TASK_SOURCE_NODE_TYPE) {
-        return { ...node, config: context.task };
-      }
-      if (node.type === AGENT_EXECUTE_NODE_TYPE) {
+      if (node.type === TASK_SOURCE_NODE_TYPE) return { ...node, config: context.task };
+      if (node.type === RUN_AGENT_NODE_TYPE) {
         const agentId = typeof config.agentId === "string" && config.agentId.trim()
           ? config.agentId
           : context.agentId;
@@ -197,23 +329,19 @@ export function hydrateEvaluationCaseSpec(
           : context.skillName;
         return { ...node, config: { ...config, skillName } };
       }
-      if (node.type === DETERMINISTIC_JUDGE_NODE_TYPE || node.type === LLM_JUDGE_NODE_TYPE) {
+      if (
+        node.type === DETERMINISTIC_JUDGE_NODE_TYPE
+        || node.type === LLM_JUDGE_NODE_TYPE
+        || node.type === TOOL_FAILURE_JUDGE_NODE_TYPE
+        || node.type === SCRIPT_JUDGE_NODE_TYPE
+        || node.type === SCRIPT_TRAJECTORY_JUDGE_NODE_TYPE
+      ) {
         const evaluatorId = typeof config.evaluatorId === "string" ? config.evaluatorId : "";
         const evaluator = evaluatorsById.get(evaluatorId);
         // A judge whose evaluator was deleted keeps its saved id and is disabled,
         // so the run reports a skipped step instead of failing to build.
         if (!evaluator) return { ...node, enabled: false, config: { ...config, evaluatorId } };
-        return {
-          ...node,
-          config: node.type === LLM_JUDGE_NODE_TYPE
-            ? {
-                evaluatorId,
-                threshold: evaluator.threshold,
-                runtimeId: evaluator.runtimeId ?? "",
-                prompt: evaluator.prompt ?? "",
-              }
-            : { evaluatorId, kind: evaluator.kind, threshold: evaluator.threshold },
-        };
+        return { ...node, config: judgeNodeConfig(evaluator) };
       }
       return node;
     }),
@@ -223,19 +351,25 @@ export function hydrateEvaluationCaseSpec(
 export function buildEvaluationCaseGraph(
   plan: EvaluationCasePlan,
   dependencies: EvaluationNodeDependencies,
-): BuiltEvaluationGraph {
-  const spec = plan.savedSpec
-    ? hydrateEvaluationCaseSpec(plan.savedSpec, {
-        task: plan.task,
-        agentId: plan.agentId,
-        skillName: plan.skillName,
-        evaluators: plan.evaluators,
-      })
+): { graph: BuiltEvaluationGraph; skippedEvaluatorIds: string[] } {
+  const built = plan.savedSpec
+    ? {
+        spec: hydrateEvaluationCaseSpec(plan.savedSpec, {
+          task: plan.task,
+          agentId: plan.agentId,
+          skillName: plan.skillName,
+          evaluators: plan.evaluators,
+        }),
+        skippedEvaluatorIds: [],
+      }
     : buildEvaluationCaseSpec(plan);
-  return buildEvaluationGraph(
-    spec,
-    createEvaluationNodeRegistry(createEvaluationNodeDefinitions(dependencies)),
-  );
+  return {
+    graph: buildEvaluationGraph(
+      built.spec,
+      createEvaluationNodeRegistry(createEvaluationNodeDefinitions(dependencies)),
+    ),
+    skippedEvaluatorIds: built.skippedEvaluatorIds,
+  };
 }
 
 /**

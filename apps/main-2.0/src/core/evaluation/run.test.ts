@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { executeEvaluationRun, type EvaluationRunPlan } from "./run";
 import type {
-  EvaluationEvidenceValue,
   EvaluationNodeDependencies,
   EvaluationTaskValue,
+  EvaluationTrajectoryValue,
 } from "./nodes/contracts";
 import type { EvaluationNodeRecord } from "./graph/node";
 
@@ -19,7 +19,9 @@ function task(id: string, overrides: Partial<EvaluationTaskValue> = {}): Evaluat
   };
 }
 
-function evidence(overrides: Partial<EvaluationEvidenceValue> = {}): EvaluationEvidenceValue {
+function trajectory(
+  overrides: Partial<EvaluationTrajectoryValue> = {},
+): EvaluationTrajectoryValue {
   return {
     turnCount: 2,
     toolCallCount: 1,
@@ -35,11 +37,12 @@ function evidence(overrides: Partial<EvaluationEvidenceValue> = {}): EvaluationE
 
 function plan(overrides: Partial<EvaluationRunPlan> = {}): EvaluationRunPlan {
   return {
+    source: "run_agent",
     agentId: "agent-1",
     skillName: null,
     evaluators: [{ id: "exact", kind: "exact_match", threshold: 1 }],
     cases: [task("case-1")],
-    linkSessions: false,
+    linkTrajectory: false,
     ...overrides,
   };
 }
@@ -48,7 +51,7 @@ function dependencies(
   overrides: Partial<EvaluationNodeDependencies> = {},
 ): EvaluationNodeDependencies {
   return {
-    executeAgent: async () => ({ output: "4", durationMs: 10 }),
+    runAgent: async () => ({ output: "4", durationMs: 10 }),
     wait: async () => undefined,
     ...overrides,
   };
@@ -103,7 +106,7 @@ describe("evaluation run", () => {
     const outcome = await executeEvaluationRun(
       plan(),
       dependencies({
-        executeAgent: async () => {
+        runAgent: async () => {
           throw new Error("claude runtime is not configured");
         },
       }),
@@ -128,7 +131,7 @@ describe("evaluation run", () => {
       plan({ skillName: "one-bite-teaching" }),
       dependencies({
         readSkill: async () => ({ content: "# Teach one point\n", hash: "abc123" }),
-        executeAgent: async (input) => {
+        runAgent: async (input) => {
           seen.push(input);
           return { output: "4", durationMs: 5 };
         },
@@ -148,7 +151,7 @@ describe("evaluation run", () => {
     await executeEvaluationRun(
       plan(),
       dependencies({
-        executeAgent: async (input) => {
+        runAgent: async (input) => {
           seen.push(input);
           return { output: "4", durationMs: 5 };
         },
@@ -178,9 +181,9 @@ describe("evaluation run", () => {
     let attempts = 0;
     const waits: number[] = [];
     const outcome = await executeEvaluationRun(
-      plan({ linkSessions: true, sessionLink: { attempts: 5, delayMs: 250 } }),
+      plan({ linkTrajectory: true, sessionLink: { attempts: 5, delayMs: 250 } }),
       dependencies({
-        executeAgent: async () => ({
+        runAgent: async () => ({
           output: "4",
           durationMs: 5,
           executionReference: { sessionId: "thread-9" },
@@ -191,7 +194,7 @@ describe("evaluation run", () => {
             ? null
             : { sessionKey: `claude:${rawId}`, source: "claude", rawId };
         },
-        readTrace: async () => evidence(),
+        readTrajectory: async () => trajectory(),
         wait: async (ms) => {
           waits.push(ms);
         },
@@ -203,29 +206,27 @@ describe("evaluation run", () => {
     expect(outcome.cases[0]!.sessionKey).toBe("claude:thread-9");
     expect(statuses(outcome.cases[0]!.aggregate.nodes)).toMatchObject({
       session: "pass",
-      evidence: "pass",
       "skill-use": "pass",
     });
   });
 
   it("keeps the output judge deciding when the session never gets indexed", async () => {
     const outcome = await executeEvaluationRun(
-      plan({ linkSessions: true, sessionLink: { attempts: 2, delayMs: 0 } }),
+      plan({ linkTrajectory: true, sessionLink: { attempts: 2, delayMs: 0 } }),
       dependencies({
-        executeAgent: async () => ({
+        runAgent: async () => ({
           output: "4",
           durationMs: 5,
           executionReference: { sessionId: "thread-9" },
         }),
         resolveSession: async () => null,
-        readTrace: async () => evidence(),
+        readTrajectory: async () => trajectory(),
       }),
     );
 
     const [result] = outcome.cases;
     expect(statuses(result!.aggregate.nodes)).toMatchObject({
       session: "excused",
-      evidence: "pending",
       "skill-use": "pending",
       "judge-exact": "pass",
     });
@@ -237,8 +238,8 @@ describe("evaluation run", () => {
 
   it("excuses the link when the runtime reported no session at all", async () => {
     const outcome = await executeEvaluationRun(
-      plan({ linkSessions: true }),
-      dependencies({ readTrace: async () => evidence(), resolveSession: async () => null }),
+      plan({ linkTrajectory: true }),
+      dependencies({ readTrajectory: async () => trajectory(), resolveSession: async () => null }),
     );
 
     expect(
@@ -251,16 +252,16 @@ describe("evaluation run", () => {
 
   it("records whether the injected skill was actually used", async () => {
     const used = await executeEvaluationRun(
-      plan({ linkSessions: true, skillName: "one-bite-teaching" }),
+      plan({ linkTrajectory: true, skillName: "one-bite-teaching" }),
       dependencies({
         readSkill: async () => ({ content: "# skill", hash: "h1" }),
-        executeAgent: async () => ({
+        runAgent: async () => ({
           output: "4",
           durationMs: 5,
           executionReference: { sessionId: "t1" },
         }),
-        resolveSession: async (rawId) => ({ sessionKey: "k1", source: "claude", rawId }),
-        readTrace: async () => evidence({ usedSkillNames: ["One-Bite-Teaching"] }),
+        resolveSession: async () => ({ sessionKey: "k1" }),
+        readTrajectory: async () => trajectory({ usedSkillNames: ["One-Bite-Teaching"] }),
       }),
     );
 
@@ -275,16 +276,16 @@ describe("evaluation run", () => {
     });
 
     const unused = await executeEvaluationRun(
-      plan({ linkSessions: true, skillName: "one-bite-teaching" }),
+      plan({ linkTrajectory: true, skillName: "one-bite-teaching" }),
       dependencies({
         readSkill: async () => ({ content: "# skill", hash: "h1" }),
-        executeAgent: async () => ({
+        runAgent: async () => ({
           output: "4",
           durationMs: 5,
           executionReference: { sessionId: "t1" },
         }),
-        resolveSession: async (rawId) => ({ sessionKey: "k1", source: "claude", rawId }),
-        readTrace: async () => evidence({ usedSkillNames: ["something-else"] }),
+        resolveSession: async () => ({ sessionKey: "k1" }),
+        readTrajectory: async () => trajectory({ usedSkillNames: ["something-else"] }),
       }),
     );
 
@@ -300,16 +301,16 @@ describe("evaluation run", () => {
     // An uninstalled usage hook must not be reported as the agent ignoring the
     // skill.
     const outcome = await executeEvaluationRun(
-      plan({ linkSessions: true, skillName: "one-bite-teaching" }),
+      plan({ linkTrajectory: true, skillName: "one-bite-teaching" }),
       dependencies({
         readSkill: async () => ({ content: "# skill", hash: "h1" }),
-        executeAgent: async () => ({
+        runAgent: async () => ({
           output: "4",
           durationMs: 5,
           executionReference: { sessionId: "t1" },
         }),
-        resolveSession: async (rawId) => ({ sessionKey: "k1", source: "claude", rawId }),
-        readTrace: async () => evidence({ skillUsageObservable: false }),
+        resolveSession: async () => ({ sessionKey: "k1" }),
+        readTrajectory: async () => trajectory({ skillUsageObservable: false }),
       }),
     );
 
@@ -323,7 +324,7 @@ describe("evaluation run", () => {
     const outcome = await executeEvaluationRun(
       plan({ cases: [task("case-1"), task("case-2"), task("case-3")] }),
       dependencies({
-        executeAgent: async () => {
+        runAgent: async () => {
           controller.abort();
           return { output: "4", durationMs: 1 };
         },

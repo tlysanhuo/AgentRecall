@@ -161,11 +161,40 @@ function RunGraph({
             {l("not scored", "未评分")} {run.unscoredCaseCount}
           </span>
         ) : null}
+        {run.coverage !== undefined ? (
+          <span title={l(
+            "Share of the planned judging that actually decided.",
+            "计划中的判定里真正得出结论的比例。",
+          )}>
+            {l("coverage", "覆盖率")} {formatRatio(run.coverage)}
+          </span>
+        ) : null}
         {run.skillHash ? (
           <span className="eval-muted">Skill @{run.skillHash.slice(0, 8)}</span>
         ) : null}
         <span className="eval-muted">{formatDuration(run.totalDurationMs ?? null)}</span>
       </div>
+      {run.dimensions?.length ? (
+        <ul className="eval-dimension-list">
+          {run.dimensions.map((dimension) => (
+            <li key={dimension.dimension}>
+              <span className="eval-dimension-name">{dimension.dimension}</span>
+              <span className="eval-dimension-bar">
+                <span style={{ width: `${Math.round((dimension.score ?? 0) * 100)}%` }} />
+              </span>
+              <span className="eval-dimension-score">
+                {dimension.score === null ? "—" : dimension.score.toFixed(2)}
+              </span>
+              {dimension.weight !== 1 ? (
+                <span className="eval-muted">×{dimension.weight}</span>
+              ) : null}
+              <span className="eval-muted">
+                {l(`${dimension.scoredCaseCount} case(s)`, `${dimension.scoredCaseCount} 个用例`)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       {run.error ? <p className="eval-error" role="alert">{run.error}</p> : null}
       {run.engine === undefined ? (
         <p className="eval-muted">
@@ -181,10 +210,14 @@ function RunGraph({
         <ol className="eval-graph-cases">
           {run.results.map((result, index) => {
             const unscored = result.unscoredReason !== undefined;
-            const passed = !unscored
-              && result.gatePassed !== false
+            // The dimension-weighted verdict decides, when the run recorded one:
+            // a case can clear its threshold with one check unmet, and reading
+            // "every check passed" would contradict the score shown beside it.
+            const passed = !unscored && (result.passed ?? (
+              result.gatePassed !== false
               && result.scores.length > 0
-              && result.scores.every((score) => score.passed);
+              && result.scores.every((score) => score.passed)
+            ));
             return (
               <li key={result.id} className="eval-graph-case">
                 <header>
@@ -213,6 +246,42 @@ function RunGraph({
                   ) : null}
                 </header>
                 <p className="eval-graph-case-input">{result.input}</p>
+                {result.score !== undefined || result.coverage !== undefined ? (
+                  <p className="eval-graph-case-score">
+                    {result.score !== undefined ? (
+                      <span>{l("score", "得分")} {result.score.toFixed(2)}</span>
+                    ) : null}
+                    {result.coverage !== undefined ? (
+                      <span className="eval-muted">
+                        {l("coverage", "覆盖率")} {formatRatio(result.coverage)}
+                      </span>
+                    ) : null}
+                    {result.dimensions?.map((dimension) => (
+                      <span
+                        key={dimension.dimension}
+                        className={`eval-badge ${dimension.unmet > 0 ? "eval-badge-warn" : "eval-badge-dim"}`}
+                        title={l(
+                          `${dimension.met} met, ${dimension.unmet} unmet, ${dimension.undecided} undecided`,
+                          `${dimension.met} 项达成、${dimension.unmet} 项未达成、${dimension.undecided} 项未判定`,
+                        )}
+                      >
+                        {dimension.dimension}
+                        {" "}
+                        {dimension.score === null ? "—" : dimension.score.toFixed(2)}
+                      </span>
+                    ))}
+                  </p>
+                ) : null}
+                {result.skippedEvaluatorIds?.length ? (
+                  <p className="eval-muted">
+                    {l(
+                      "Not applicable to this source, so it never ran",
+                      "不适用于该产物来源，因此没有执行",
+                    )}
+                    {" · "}
+                    {result.skippedEvaluatorIds.join(", ")}
+                  </p>
+                ) : null}
                 {unscored ? (
                   <p className="eval-muted">
                     {l("Nothing was decided", "没有得出任何结论")}

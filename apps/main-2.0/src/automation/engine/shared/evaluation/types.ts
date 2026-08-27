@@ -1,7 +1,18 @@
+import type { EvaluationJudgeSubject } from "../../../../core/evaluation/case-graph";
 import type { EvaluationNodeRecord } from "../../../../core/evaluation/graph/node";
 import type { EvaluationGraphSpec } from "../../../../core/evaluation/graph/builder";
+import type {
+  EvaluationDimensionScore,
+  EvaluationRunScore,
+  EvaluationScoringConfig,
+} from "../../../../core/evaluation/graph/scorer";
 
 export type { EvaluationNodeRecord } from "../../../../core/evaluation/graph/node";
+export type {
+  EvaluationDimensionScore,
+  EvaluationScoringConfig,
+} from "../../../../core/evaluation/graph/scorer";
+export type { EvaluationJudgeSubject } from "../../../../core/evaluation/case-graph";
 export type {
   EvaluationGraphNodeSpec,
   EvaluationGraphSpec,
@@ -33,7 +44,18 @@ export interface EvaluationDataset {
   updatedAt: number;
 }
 
-export type EvaluatorKind = "contains" | "exact_match" | "json_valid" | "llm_judge";
+/**
+ * `tool_failures` decides on the trajectory rather than the answer, so it only
+ * applies to a source that has one — a folder artifact has none. A `script`
+ * evaluator picks its own subject.
+ */
+export type EvaluatorKind =
+  | "contains"
+  | "exact_match"
+  | "json_valid"
+  | "llm_judge"
+  | "tool_failures"
+  | "script";
 
 export interface EvaluationEvaluator {
   id: string;
@@ -43,6 +65,30 @@ export interface EvaluationEvaluator {
   runtimeId?: string;
   threshold: number;
   enabled: boolean;
+  /**
+   * Dimension this evaluator scores. Scores are averaged inside a dimension
+   * before dimensions are combined, so adding a second check to a dimension does
+   * not quietly increase that dimension's say. Defaults to the evaluator id.
+   */
+  dimension?: string;
+  /** Weighted through the experiment's scoring config, not on its own. */
+  priority?: "must" | "should";
+  /** Only for `tool_failures`: failures tolerated before the verdict goes unmet. */
+  maxToolFailures?: number;
+  /**
+   * Only for `script`. Inline JS runs sandboxed with no filesystem, network or
+   * module access; a command is spawned with the subject on stdin and must print
+   * its verdicts to stdout. Either way, a script that breaks excuses its own
+   * judgement rather than scoring the agent zero.
+   */
+  scriptMode?: "inline_js" | "command";
+  /** Function body for `inline_js`, with `task`, `artifact` and `trajectory` in scope. */
+  script?: string;
+  command?: string;
+  commandArgs?: string[];
+  /** What the script looks at. Defaults to the artifact. */
+  subject?: EvaluationJudgeSubject;
+  timeoutMs?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -69,6 +115,13 @@ export interface EvaluationExperiment {
   evaluatorIds: string[];
   repetitions: number;
   /**
+   * Where each case's artifact comes from. Absent means `run_agent`, which is
+   * what every experiment created before artifact sources existed did.
+   */
+  source?: "run_agent" | "session" | "folder";
+  /** Dimension weights, pass threshold and minimum coverage for this experiment. */
+  scoring?: EvaluationScoringConfig | null;
+  /**
    * Custom graph for this experiment. Null or absent means the runner derives
    * the standard shape, which is what every experiment created before the editor
    * existed does.
@@ -88,6 +141,8 @@ export interface EvaluationScore {
   evaluatorId: string;
   score: number;
   passed: boolean;
+  /** Dimension the verdict belongs to, for the per-dimension breakdown. */
+  dimension?: string;
   reason?: string;
   evidence?: string[];
   failedCriteria?: string[];
@@ -121,6 +176,21 @@ export interface EvaluationCaseResult {
     skillHash: string;
     contentLength: number;
   };
+  /** Weighted score across dimensions, 0..1. Absent when nothing was decided. */
+  score?: number;
+  /** True when the score cleared the threshold and coverage was sufficient. */
+  passed?: boolean;
+  /** Decided weight over planned weight, 0..1. */
+  coverage?: number;
+  /** Per-dimension breakdown, which is what a single score cannot show. */
+  dimensions?: EvaluationDimensionScore[];
+  /** Every label key broken down by value, for reports that slice differently. */
+  byLabel?: Record<string, Record<string, number | null>>;
+  /**
+   * Evaluators this source could not judge — a trajectory judge against a folder
+   * artifact, for instance. Reported so the omission is visible.
+   */
+  skippedEvaluatorIds?: string[];
   /**
    * Why this case has no score. Set when nothing was decided — a missing judge
    * runtime, an agent that never answered, a cancelled run — so the absence is
@@ -156,6 +226,10 @@ export interface EvaluationRun {
   scoredCaseCount?: number;
   /** Cases that decided nothing; excluded from every score above. */
   unscoredCaseCount?: number;
+  /** Mean coverage over the scored cases. */
+  coverage?: number;
+  /** Dimension scores averaged across cases. */
+  dimensions?: EvaluationRunScore["dimensions"];
 }
 
 export type EvaluationRunSummary = Omit<EvaluationRun, "results"> & {

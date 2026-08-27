@@ -8,10 +8,18 @@ import type {
   ListEvaluationRunsRequest,
 } from "../../automation/contracts";
 import { runEvaluation } from "../../automation/engine/main/evaluation-runner";
+import {
+  datasetFolderCaseId,
+  datasetFolderId,
+  datasetFolderItems,
+  readDatasetFolder,
+  writeDatasetFolder,
+} from "../../core/evaluation/dataset-folder-io";
+import type { RunEvaluationInput } from "../../automation/engine/main/evaluation-runner";
 import type { EvaluationStore } from "../../automation/engine/main/evaluation-store";
 import type {
-  EvaluationEvidenceValue,
-  EvaluationSessionValue,
+  EvaluationArtifactFile,
+  EvaluationTrajectoryValue,
 } from "../../core/evaluation/nodes/contracts";
 
 export type EvaluationAgentExecution = (
@@ -64,11 +72,29 @@ export interface EvaluationServiceDependencies {
   readSkill?: (skillName: string) => Promise<{ content: string; hash: string } | null>;
   /**
    * Resolves the runtime session id an execution reported to the indexed
-   * AgentRecall session. Session linkage is skipped when this and `readTrace`
-   * are not both wired.
+   * AgentRecall session. The trajectory half of a run is skipped when this and
+   * `readTrajectory` are not both wired.
    */
-  resolveSession?: (rawId: string) => Promise<EvaluationSessionValue | null>;
-  readTrace?: (sessionKey: string) => Promise<EvaluationEvidenceValue | null>;
+  resolveSession?: (rawId: string) => Promise<{ sessionKey: string } | null>;
+  readTrajectory?: (sessionKey: string) => Promise<EvaluationTrajectoryValue | null>;
+  /** Reads a session's answer, for evaluating a session that already happened. */
+  readSessionArtifact?: (
+    sessionKey: string,
+  ) => Promise<{ output: string; files?: EvaluationArtifactFile[] } | null>;
+  /** Reads an artifact folder from disk. */
+  readFolderArtifact?: (
+    path: string,
+  ) => Promise<{ output: string; files?: EvaluationArtifactFile[] } | null>;
+  /**
+   * Runs a judge the user wrote as code. Without it a script evaluator excuses
+   * itself, which keeps it visible in the report instead of scoring zero.
+   */
+  runJudgeScript?: RunEvaluationInput["runJudgeScript"];
+  /**
+   * Opens a native directory picker, returning null when the user cancels. The
+   * renderer never names a path of its own; the dialog is the only way in.
+   */
+  chooseDatasetDirectory?: (mode: "import" | "export") => Promise<string | null>;
 }
 
 interface ActiveEvaluationExecution {
@@ -96,6 +122,61 @@ export class EvaluationService {
 
   deleteDataset(id: string): Promise<unknown> {
     return this.dependencies.store.deleteDataset(id);
+  }
+
+  /**
+   * Imports a dataset folder the user picks.
+   *
+   * The dataset id is derived from the folder path, so re-importing after editing
+   * the files updates the same dataset instead of leaving a pile of near-copies —
+   * the folder is the source of truth, and this keeps the app's copy tracking it.
+   */
+  async importDatasetFolder(): Promise<
+    { dataset: EvaluationDataset; directory: string; errors: string[] } | null
+  > {
+    this.assertOpen();
+    const directory = await this.dependencies.chooseDatasetDirectory?.("import");
+    if (!directory) return null;
+    const folder = readDatasetFolder(directory);
+    if (folder.cases.length === 0) {
+      throw new Error(folder.errors[0] ?? `没有读到任何用例：${directory}`);
+    }
+    const existing = (await this.dependencies.store.listDatasets())
+      .find((item) => item.id === datasetFolderId(directory));
+    const now = Date.now();
+    const dataset = await this.dependencies.store.saveDataset({
+      id: datasetFolderId(directory),
+      name: folder.manifest.name,
+      description: folder.manifest.description,
+      items: datasetFolderItems(datasetFolderId(directory), folder.cases),
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    });
+    return { dataset, directory, errors: folder.errors };
+  }
+
+  /** Writes a dataset to a folder the user picks, in the same format. */
+  async exportDatasetFolder(
+    datasetId: string,
+  ): Promise<{ directory: string; caseCount: number } | null> {
+    this.assertOpen();
+    const dataset = (await this.dependencies.store.listDatasets())
+      .find((item) => item.id === datasetId);
+    if (!dataset) throw new Error(`Evaluation dataset not found: ${datasetId}`);
+    const directory = await this.dependencies.chooseDatasetDirectory?.("export");
+    if (!directory) return null;
+    const written = writeDatasetFolder(directory, {
+      name: dataset.name,
+      description: dataset.description,
+      cases: dataset.items.map((item) => ({
+        id: datasetFolderCaseId(dataset.id, item.id),
+        input: item.input,
+        ...(item.expectedOutput !== undefined ? { expectedOutput: item.expectedOutput } : {}),
+        ...(typeof item.metadata.context === "string" ? { context: item.metadata.context } : {}),
+        metadata: item.metadata,
+      })),
+    });
+    return { directory, caseCount: written.caseCount };
   }
 
   // Idempotently provisions the built-in LLM judge bound to the execution
@@ -258,7 +339,10 @@ export class EvaluationService {
     agentRevisionId?: string;
     readSkill?: EvaluationServiceDependencies["readSkill"];
     resolveSession?: EvaluationServiceDependencies["resolveSession"];
-    readTrace?: EvaluationServiceDependencies["readTrace"];
+    readTrajectory?: EvaluationServiceDependencies["readTrajectory"];
+    readSessionArtifact?: EvaluationServiceDependencies["readSessionArtifact"];
+    readFolderArtifact?: EvaluationServiceDependencies["readFolderArtifact"];
+    runJudgeScript?: EvaluationServiceDependencies["runJudgeScript"];
     execute: EvaluationAgentExecution;
     executeJudge: (
       runtimeId: string,
@@ -317,7 +401,18 @@ export class EvaluationService {
       ...(this.dependencies.resolveSession
         ? { resolveSession: this.dependencies.resolveSession }
         : {}),
-      ...(this.dependencies.readTrace ? { readTrace: this.dependencies.readTrace } : {}),
+      ...(this.dependencies.readTrajectory
+        ? { readTrajectory: this.dependencies.readTrajectory }
+        : {}),
+      ...(this.dependencies.readSessionArtifact
+        ? { readSessionArtifact: this.dependencies.readSessionArtifact }
+        : {}),
+      ...(this.dependencies.readFolderArtifact
+        ? { readFolderArtifact: this.dependencies.readFolderArtifact }
+        : {}),
+      ...(this.dependencies.runJudgeScript
+        ? { runJudgeScript: this.dependencies.runJudgeScript }
+        : {}),
       execute: this.dependencies.executeAgent,
       executeJudge: (runtimeId, prompt, signal) => {
         const judge = judgesByRuntime.get(runtimeId);

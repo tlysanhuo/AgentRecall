@@ -4,31 +4,36 @@ import {
   evaluationPass,
 } from "../graph/node";
 import {
-  EVIDENCE_PORT,
-  EXECUTION_PORT,
+  ARTIFACT_PORT,
+  EXECUTION_REF_PORT,
   INSTRUCTIONS_PORT,
-  SESSION_PORT,
   TASK_PORT,
-  type EvaluationEvidenceValue,
+  TRAJECTORY_PORT,
   type EvaluationNodeDependencies,
   type EvaluationTaskValue,
+  type EvaluationTrajectoryValue,
 } from "./contracts";
 
 /**
- * The `prepare` half of the evaluation graph: everything that produces facts
- * for judges to decide on. None of these may emit a verdict.
+ * Artifact sources and the prepare steps around them.
  *
- * Their shared discipline: when a step cannot be completed for a reason that
- * has nothing to do with the agent under evaluation, it is `excused`. The
- * judges downstream then record `pending` with that reason instead of scoring
- * an empty answer as a failure.
+ * A graph starts at a source, which answers "what is being evaluated": an agent
+ * run made now, a session that already happened, or a folder on disk. Whichever
+ * it is, judges downstream see the same two ports — the artifact and, when the
+ * source has one, the trajectory.
+ *
+ * None of these may emit a verdict. Their shared discipline: when a step cannot
+ * be completed for a reason that has nothing to do with the agent under
+ * evaluation, it is `excused`, and the judges then record `pending` with that
+ * reason instead of scoring an absence.
  */
 
 export const TASK_SOURCE_NODE_TYPE = "task_source";
 export const SKILL_PROVISION_NODE_TYPE = "skill_provision";
-export const AGENT_EXECUTE_NODE_TYPE = "agent_execute";
+export const RUN_AGENT_NODE_TYPE = "run_agent";
 export const SESSION_LINK_NODE_TYPE = "session_link";
-export const EVIDENCE_EXTRACT_NODE_TYPE = "evidence_extract";
+export const SESSION_ARTIFACT_NODE_TYPE = "session_artifact";
+export const FOLDER_ARTIFACT_NODE_TYPE = "folder_artifact";
 export const SKILL_USE_OBSERVE_NODE_TYPE = "skill_use_observe";
 
 /** Emits the case under evaluation. Its config is the case itself. */
@@ -103,35 +108,35 @@ export function createSkillProvisionNode(
   });
 }
 
-export interface AgentExecuteConfig {
+export interface RunAgentConfig {
   agentId: string;
 }
 
 /**
- * Runs the evaluated agent once.
+ * Produces the artifact by running the agent once.
  *
  * A throw here means the agent never answered — a missing runtime, a crashed
  * CLI, a cancelled run. That is `excused`, not a zero: an agent that could not
  * be launched has told us nothing, and scoring it as a failure would blame the
  * model for AgentRecall's own plumbing.
  */
-export function createAgentExecuteNode(
-  dependencies: Pick<EvaluationNodeDependencies, "executeAgent">,
+export function createRunAgentNode(
+  dependencies: Pick<EvaluationNodeDependencies, "runAgent">,
 ) {
   return defineEvaluationNode<
     { task: typeof TASK_PORT; instructions: typeof INSTRUCTIONS_PORT },
-    { execution: typeof EXECUTION_PORT },
-    AgentExecuteConfig
+    { artifact: typeof ARTIFACT_PORT; execution_ref: typeof EXECUTION_REF_PORT },
+    RunAgentConfig
   >({
-    type: AGENT_EXECUTE_NODE_TYPE,
+    type: RUN_AGENT_NODE_TYPE,
     version: 1,
     role: "prepare",
     inputs: { task: TASK_PORT, instructions: INSTRUCTIONS_PORT },
-    outputs: { execution: EXECUTION_PORT },
+    outputs: { artifact: ARTIFACT_PORT, execution_ref: EXECUTION_REF_PORT },
     async run(context) {
       const { task, instructions } = context.in;
       try {
-        const execution = await dependencies.executeAgent(
+        const result = await dependencies.runAgent(
           {
             agentId: context.config.agentId,
             prompt: task.input,
@@ -140,12 +145,20 @@ export function createAgentExecuteNode(
           context.signal,
         );
         return evaluationPass({
-          outputs: { execution },
+          outputs: {
+            artifact: {
+              output: result.output,
+              origin: { kind: "agent_run" },
+              durationMs: result.durationMs,
+            },
+            execution_ref: result.executionReference ?? {},
+          },
           facts: {
-            outputLength: execution.output.length,
+            outputLength: result.output.length,
+            durationMs: result.durationMs,
             ...(instructions.skill ? { injectedSkill: instructions.skill.skillName } : {}),
-            ...(execution.executionReference?.sessionId
-              ? { runtimeSessionId: execution.executionReference.sessionId }
+            ...(result.executionReference?.sessionId
+              ? { runtimeSessionId: result.executionReference.sessionId }
               : {}),
           },
         });
@@ -166,36 +179,34 @@ export interface SessionLinkConfig {
 }
 
 /**
- * Links the execution to the indexed AgentRecall session it produced.
+ * Turns a fresh run into a trajectory by finding the session it produced.
  *
  * Indexing is asynchronous, so the session a run just created may not be
  * queryable yet. The node retries within a bound and then excuses itself — it
- * never reports a link it does not have, because a missing link must not read
- * as "this run had no session".
+ * never reports a trajectory it does not have, because a missing one must not
+ * read as "this run did no work".
  */
 export function createSessionLinkNode(
-  dependencies: Pick<EvaluationNodeDependencies, "resolveSession" | "wait">,
+  dependencies: Pick<EvaluationNodeDependencies, "resolveSession" | "readTrajectory" | "wait">,
 ) {
   return defineEvaluationNode<
-    { execution: typeof EXECUTION_PORT },
-    { session: typeof SESSION_PORT },
+    { execution_ref: typeof EXECUTION_REF_PORT },
+    { trajectory: typeof TRAJECTORY_PORT },
     SessionLinkConfig
   >({
     type: SESSION_LINK_NODE_TYPE,
     version: 1,
     role: "prepare",
-    inputs: { execution: EXECUTION_PORT },
-    outputs: { session: SESSION_PORT },
+    inputs: { execution_ref: EXECUTION_REF_PORT },
+    outputs: { trajectory: TRAJECTORY_PORT },
     async run(context) {
-      const rawId = context.in.execution.executionReference?.sessionId?.trim();
-      if (!rawId) {
-        return evaluationExcused.infra("runtime_reported_no_session");
-      }
-      if (!dependencies.resolveSession) {
+      const rawId = context.in.execution_ref.sessionId?.trim();
+      if (!rawId) return evaluationExcused.infra("runtime_reported_no_session");
+      if (!dependencies.resolveSession || !dependencies.readTrajectory) {
         return evaluationExcused.infra("session_lookup_unavailable", { facts: { rawId } });
       }
-      const attempts = Math.max(1, Math.min(30, context.config.attempts ?? 10));
-      const delayMs = Math.max(0, Math.min(10_000, context.config.delayMs ?? 1_000));
+      const attempts = Math.max(1, Math.min(30, context.config.attempts ?? 6));
+      const delayMs = Math.max(0, Math.min(10_000, context.config.delayMs ?? 500));
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
         if (context.signal.aborted) {
           return evaluationExcused.infra("cancelled_before_session_link", {
@@ -204,9 +215,15 @@ export function createSessionLinkNode(
         }
         const session = await dependencies.resolveSession(rawId);
         if (session) {
+          const trajectory = await dependencies.readTrajectory(session.sessionKey);
+          if (!trajectory) {
+            return evaluationExcused.infra("trajectory_not_available", {
+              facts: { rawId, sessionKey: session.sessionKey },
+            });
+          }
           return evaluationPass({
-            outputs: { session },
-            facts: { rawId, sessionKey: session.sessionKey, attempt },
+            outputs: { trajectory: { ...trajectory, sessionKey: session.sessionKey } },
+            facts: { rawId, sessionKey: session.sessionKey, attempt, ...trajectoryFacts(trajectory) },
           });
         }
         if (attempt < attempts && dependencies.wait) await dependencies.wait(delayMs);
@@ -216,46 +233,92 @@ export function createSessionLinkNode(
   });
 }
 
-/** Reads the linked session's trajectory so judges can decide on behavior. */
-export function createEvidenceExtractNode(
-  dependencies: Pick<EvaluationNodeDependencies, "readTrace">,
+/**
+ * Evaluates a session that already happened, which is the cheap path: nothing is
+ * re-run, so a new rubric can be applied to work the agent did days ago.
+ */
+export function createSessionArtifactNode(
+  dependencies: Pick<EvaluationNodeDependencies, "readSessionArtifact" | "readTrajectory">,
 ) {
   return defineEvaluationNode<
-    { session: typeof SESSION_PORT },
-    { evidence: typeof EVIDENCE_PORT },
+    { task: typeof TASK_PORT },
+    { artifact: typeof ARTIFACT_PORT; trajectory: typeof TRAJECTORY_PORT },
     Record<string, never>
   >({
-    type: EVIDENCE_EXTRACT_NODE_TYPE,
+    type: SESSION_ARTIFACT_NODE_TYPE,
     version: 1,
     role: "prepare",
-    inputs: { session: SESSION_PORT },
-    outputs: { evidence: EVIDENCE_PORT },
+    inputs: { task: TASK_PORT },
+    outputs: { artifact: ARTIFACT_PORT, trajectory: TRAJECTORY_PORT },
     async run(context) {
-      if (!dependencies.readTrace) {
-        return evaluationExcused.infra("trace_reader_unavailable");
+      const sessionKey = context.in.task.artifactRef?.sessionKey?.trim();
+      if (!sessionKey) return evaluationExcused.infra("case_names_no_session");
+      if (!dependencies.readSessionArtifact || !dependencies.readTrajectory) {
+        return evaluationExcused.infra("session_reader_unavailable", { facts: { sessionKey } });
       }
-      const evidence = await dependencies.readTrace(context.in.session.sessionKey);
-      if (!evidence) {
-        return evaluationExcused.infra("trace_not_available", {
-          facts: { sessionKey: context.in.session.sessionKey },
-        });
+      const artifact = await dependencies.readSessionArtifact(sessionKey);
+      if (!artifact) {
+        return evaluationExcused.infra("session_not_found", { facts: { sessionKey } });
+      }
+      const trajectory = await dependencies.readTrajectory(sessionKey);
+      if (!trajectory) {
+        return evaluationExcused.infra("trajectory_not_available", { facts: { sessionKey } });
       }
       return evaluationPass({
-        outputs: { evidence },
-        facts: evidenceFacts(evidence),
+        outputs: {
+          artifact: {
+            output: artifact.output,
+            ...(artifact.files ? { files: artifact.files } : {}),
+            origin: { kind: "session", reference: sessionKey },
+          },
+          trajectory: { ...trajectory, sessionKey },
+        },
+        facts: { sessionKey, outputLength: artifact.output.length, ...trajectoryFacts(trajectory) },
       });
     },
   });
 }
 
-function evidenceFacts(evidence: EvaluationEvidenceValue): Record<string, unknown> {
-  return {
-    turnCount: evidence.turnCount,
-    toolCallCount: evidence.toolCallCount,
-    toolFailureCount: evidence.toolFailureCount,
-    ...(evidence.totalTokens !== null ? { totalTokens: evidence.totalTokens } : {}),
-    ...(evidence.usedSkillNames.length > 0 ? { usedSkillNames: evidence.usedSkillNames } : {}),
-  };
+/**
+ * Evaluates an artifact folder. There is no trajectory behind a folder, so a
+ * graph that also judges trajectory will report those judges as never having
+ * run — which is the honest answer rather than a zero.
+ */
+export function createFolderArtifactNode(
+  dependencies: Pick<EvaluationNodeDependencies, "readFolderArtifact">,
+) {
+  return defineEvaluationNode<
+    { task: typeof TASK_PORT },
+    { artifact: typeof ARTIFACT_PORT },
+    Record<string, never>
+  >({
+    type: FOLDER_ARTIFACT_NODE_TYPE,
+    version: 1,
+    role: "prepare",
+    inputs: { task: TASK_PORT },
+    outputs: { artifact: ARTIFACT_PORT },
+    async run(context) {
+      const path = context.in.task.artifactRef?.path?.trim();
+      if (!path) return evaluationExcused.infra("case_names_no_folder");
+      if (!dependencies.readFolderArtifact) {
+        return evaluationExcused.infra("folder_reader_unavailable", { facts: { path } });
+      }
+      const artifact = await dependencies.readFolderArtifact(path);
+      if (!artifact) {
+        return evaluationExcused.infra("folder_not_readable", { facts: { path } });
+      }
+      return evaluationPass({
+        outputs: {
+          artifact: {
+            output: artifact.output,
+            ...(artifact.files ? { files: artifact.files } : {}),
+            origin: { kind: "folder", reference: path },
+          },
+        },
+        facts: { path, fileCount: artifact.files?.length ?? 0 },
+      });
+    },
+  });
 }
 
 /**
@@ -271,21 +334,21 @@ function evidenceFacts(evidence: EvaluationEvidenceValue): Record<string, unknow
  * missing hook.
  */
 export const skillUseObserveNode = defineEvaluationNode<
-  { instructions: typeof INSTRUCTIONS_PORT; evidence: typeof EVIDENCE_PORT },
+  { instructions: typeof INSTRUCTIONS_PORT; trajectory: typeof TRAJECTORY_PORT },
   Record<string, never>,
   Record<string, never>
 >({
   type: SKILL_USE_OBSERVE_NODE_TYPE,
   version: 1,
   role: "prepare",
-  inputs: { instructions: INSTRUCTIONS_PORT, evidence: EVIDENCE_PORT },
+  inputs: { instructions: INSTRUCTIONS_PORT, trajectory: TRAJECTORY_PORT },
   outputs: {},
   async run(context) {
     const injected = context.in.instructions.skill;
     if (!injected) return evaluationPass({ facts: { injected: false } });
-    const evidence = context.in.evidence;
-    const used = evidence.skillUsageObservable
-      ? evidence.usedSkillNames.some(
+    const trajectory = context.in.trajectory;
+    const used = trajectory.skillUsageObservable
+      ? trajectory.usedSkillNames.some(
           (name) => name.trim().toLowerCase() === injected.skillName.trim().toLowerCase(),
         )
       : null;
@@ -294,9 +357,18 @@ export const skillUseObserveNode = defineEvaluationNode<
         injected: true,
         skillName: injected.skillName,
         skillHash: injected.skillHash,
-        observable: evidence.skillUsageObservable,
+        observable: trajectory.skillUsageObservable,
         used,
       },
     });
   },
 });
+
+function trajectoryFacts(trajectory: EvaluationTrajectoryValue): Record<string, unknown> {
+  return {
+    turnCount: trajectory.turnCount,
+    toolCallCount: trajectory.toolCallCount,
+    toolFailureCount: trajectory.toolFailureCount,
+    ...(trajectory.totalTokens !== null ? { totalTokens: trajectory.totalTokens } : {}),
+  };
+}

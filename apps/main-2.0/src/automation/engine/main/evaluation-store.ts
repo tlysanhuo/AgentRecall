@@ -2,6 +2,7 @@ import type { PostgresDatabase, PostgresQueryable } from "../../../core/postgres
 import type {
   EvaluationCaseResult,
   EvaluationDataset,
+  EvaluationDimensionScore,
   EvaluationEvaluator,
   EvaluationExperiment,
   EvaluationExperimentGraph,
@@ -10,6 +11,7 @@ import type {
   EvaluationRunPage,
   EvaluationRunSummary,
   EvaluationScore,
+  EvaluationScoringConfig,
   EvaluationVerdict,
   ListEvaluationRunsRequest,
 } from "../shared/evaluation/types";
@@ -104,8 +106,15 @@ export class EvaluationStore {
     await this.database.query(
       `insert into agent_recall.evaluation_evaluators (
         id, name, kind, prompt, agent_id, runtime_id, threshold, enabled,
+        dimension, priority, max_tool_failures,
+        script_mode, script, command, command_args, subject, timeout_ms,
         created_at, updated_at
-      ) values ($1, $2, $3, $4, null, $5, $6, $7, $8, $9)
+      ) values (
+        $1, $2, $3, $4, null, $5, $6, $7,
+        $8, $9, $10,
+        $11, $12, $13, $14::jsonb, $15, $16,
+        $17, $18
+      )
       on conflict (id) do update set
         name = excluded.name,
         kind = excluded.kind,
@@ -114,6 +123,15 @@ export class EvaluationStore {
         runtime_id = excluded.runtime_id,
         threshold = excluded.threshold,
         enabled = excluded.enabled,
+        dimension = excluded.dimension,
+        priority = excluded.priority,
+        max_tool_failures = excluded.max_tool_failures,
+        script_mode = excluded.script_mode,
+        script = excluded.script,
+        command = excluded.command,
+        command_args = excluded.command_args,
+        subject = excluded.subject,
+        timeout_ms = excluded.timeout_ms,
         updated_at = excluded.updated_at`,
       [
         value.id,
@@ -123,6 +141,15 @@ export class EvaluationStore {
         value.runtimeId ?? null,
         value.threshold,
         value.enabled,
+        value.dimension ?? null,
+        value.priority ?? null,
+        value.maxToolFailures ?? null,
+        value.scriptMode ?? null,
+        value.script ?? null,
+        value.command ?? null,
+        value.commandArgs ? JSON.stringify(value.commandArgs) : null,
+        value.subject ?? null,
+        value.timeoutMs ?? null,
         new Date(value.createdAt),
         new Date(value.updatedAt),
       ],
@@ -161,6 +188,12 @@ export class EvaluationStore {
         graph: row.graph != null
           ? jsonValue(row.graph) as EvaluationExperimentGraph
           : null,
+        ...(row.source
+          ? { source: row.source as NonNullable<EvaluationExperiment["source"]> }
+          : {}),
+        scoring: row.scoring != null
+          ? jsonValue(row.scoring) as EvaluationScoringConfig
+          : null,
         createdAt: timestamp(row.created_at),
         updatedAt: timestamp(row.updated_at),
       };
@@ -171,8 +204,9 @@ export class EvaluationStore {
     await this.database.transaction(async (transaction) => {
       await transaction.query(
         `insert into agent_recall.evaluation_experiments (
-          id, name, dataset_id, agent_id, repetitions, skill_name, skill_hash, graph, created_at, updated_at
-        ) values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
+          id, name, dataset_id, agent_id, repetitions, skill_name, skill_hash,
+          graph, source, scoring, created_at, updated_at
+        ) values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10::jsonb, $11, $12)
         on conflict (id) do update set
           name = excluded.name,
           dataset_id = excluded.dataset_id,
@@ -181,6 +215,8 @@ export class EvaluationStore {
           skill_name = excluded.skill_name,
           skill_hash = excluded.skill_hash,
           graph = excluded.graph,
+          source = excluded.source,
+          scoring = excluded.scoring,
           updated_at = excluded.updated_at`,
         [
           value.id,
@@ -191,6 +227,8 @@ export class EvaluationStore {
           value.skillName ?? null,
           value.skillHash ?? null,
           value.graph ? JSON.stringify(value.graph) : null,
+          value.source ?? null,
+          value.scoring ? JSON.stringify(value.scoring) : null,
           new Date(value.createdAt),
           new Date(value.updatedAt),
         ],
@@ -279,8 +317,10 @@ export class EvaluationStore {
         `insert into agent_recall.evaluation_runs (
           id, experiment_id, status, agent_revision_id, skill_hash, started_at, finished_at,
           average_score, minimum_score, pass_rate, total_duration_ms, error,
-          engine, scored_case_count, unscored_case_count
-        ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+          engine, scored_case_count, unscored_case_count, coverage, dimensions
+        ) values (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb
+        )
         on conflict (id) do update set
           status = excluded.status,
           finished_at = excluded.finished_at,
@@ -292,6 +332,8 @@ export class EvaluationStore {
           engine = excluded.engine,
           scored_case_count = excluded.scored_case_count,
           unscored_case_count = excluded.unscored_case_count,
+          coverage = excluded.coverage,
+          dimensions = excluded.dimensions,
           skill_hash = coalesce(agent_recall.evaluation_runs.skill_hash, excluded.skill_hash)`,
         [
           value.id,
@@ -309,6 +351,8 @@ export class EvaluationStore {
           value.engine ?? null,
           value.scoredCaseCount ?? null,
           value.unscoredCaseCount ?? null,
+          value.coverage ?? null,
+          value.dimensions ? JSON.stringify(value.dimensions) : null,
         ],
       );
       await transaction.query(
@@ -522,6 +566,22 @@ export class EvaluationStore {
           : {}),
         ...(result.unscored_reason ? { unscoredReason: String(result.unscored_reason) } : {}),
         ...(typeof result.gate_passed === "boolean" ? { gatePassed: result.gate_passed } : {}),
+        ...(result.score !== null && result.score !== undefined
+          ? { score: Number(result.score) }
+          : {}),
+        ...(typeof result.passed === "boolean" ? { passed: result.passed } : {}),
+        ...(result.coverage !== null && result.coverage !== undefined
+          ? { coverage: Number(result.coverage) }
+          : {}),
+        ...(result.dimensions
+          ? { dimensions: jsonObjectArray<EvaluationDimensionScore>(result.dimensions) }
+          : {}),
+        ...(result.by_label
+          ? { byLabel: jsonRecord(result.by_label) as EvaluationCaseResult["byLabel"] }
+          : {}),
+        ...(result.skipped_evaluator_ids
+          ? { skippedEvaluatorIds: jsonArray(result.skipped_evaluator_ids) as string[] }
+          : {}),
       };
     });
     const {
@@ -541,8 +601,12 @@ export class EvaluationStore {
       `insert into agent_recall.evaluation_case_results (
         id, run_id, dataset_item_id, repetition, input, expected_output,
         output, error, duration_ms, session_key, skill_name, skill_hash,
-        skill_content_length, unscored_reason, gate_passed
-      ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+        skill_content_length, unscored_reason, gate_passed,
+        score, passed, coverage, dimensions, by_label, skipped_evaluator_ids
+      ) values (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+        $16, $17, $18, $19::jsonb, $20::jsonb, $21::jsonb
+      )`,
       [
         result.id,
         runId,
@@ -559,6 +623,14 @@ export class EvaluationStore {
         result.skillInjection?.contentLength ?? null,
         result.unscoredReason ?? null,
         result.gatePassed ?? null,
+        result.score ?? null,
+        result.passed ?? null,
+        result.coverage ?? null,
+        result.dimensions ? JSON.stringify(result.dimensions) : null,
+        result.byLabel ? JSON.stringify(result.byLabel) : null,
+        result.skippedEvaluatorIds && result.skippedEvaluatorIds.length > 0
+          ? JSON.stringify(result.skippedEvaluatorIds)
+          : null,
       ],
     );
     await this.insertCaseNodes(transaction, result);
@@ -566,8 +638,8 @@ export class EvaluationStore {
       await transaction.query(
         `insert into agent_recall.evaluation_scores (
           case_result_id, evaluator_id, score, passed, reason, evidence,
-          failed_criteria, duration_ms, token_count, estimated_cost
-        ) values ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10)`,
+          failed_criteria, duration_ms, token_count, estimated_cost, dimension
+        ) values ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10, $11)`,
         [
           result.id,
           score.evaluatorId,
@@ -579,6 +651,7 @@ export class EvaluationStore {
           score.durationMs,
           score.tokenCount ?? null,
           score.estimatedCost ?? null,
+          score.dimension ?? null,
         ],
       );
     }
@@ -655,6 +728,21 @@ function mapEvaluator(row: Row): EvaluationEvaluator {
     ...(row.runtime_id ? { runtimeId: String(row.runtime_id) } : {}),
     threshold: Number(row.threshold),
     enabled: Boolean(row.enabled),
+    ...(row.dimension ? { dimension: String(row.dimension) } : {}),
+    ...(row.priority ? { priority: row.priority as EvaluationEvaluator["priority"] } : {}),
+    ...(row.max_tool_failures !== null && row.max_tool_failures !== undefined
+      ? { maxToolFailures: Number(row.max_tool_failures) }
+      : {}),
+    ...(row.script_mode
+      ? { scriptMode: row.script_mode as EvaluationEvaluator["scriptMode"] }
+      : {}),
+    ...(row.script ? { script: String(row.script) } : {}),
+    ...(row.command ? { command: String(row.command) } : {}),
+    ...(row.command_args ? { commandArgs: jsonValue(row.command_args) as string[] } : {}),
+    ...(row.subject ? { subject: row.subject as EvaluationEvaluator["subject"] } : {}),
+    ...(row.timeout_ms !== null && row.timeout_ms !== undefined
+      ? { timeoutMs: Number(row.timeout_ms) }
+      : {}),
     createdAt: timestamp(row.created_at),
     updatedAt: timestamp(row.updated_at),
   };
@@ -689,6 +777,16 @@ function mapRunSummary(row: Row): EvaluationRunSummary {
     ...(row.unscored_case_count !== null && row.unscored_case_count !== undefined
       ? { unscoredCaseCount: Number(row.unscored_case_count) }
       : {}),
+    ...(row.coverage !== null && row.coverage !== undefined
+      ? { coverage: Number(row.coverage) }
+      : {}),
+    ...(row.dimensions
+      ? {
+          dimensions: jsonObjectArray<
+            NonNullable<EvaluationRun["dimensions"]>[number]
+          >(row.dimensions),
+        }
+      : {}),
     resultCount: Number(row.result_count ?? 0),
     failedResultCount: Number(row.failed_result_count ?? 0),
   };
@@ -699,6 +797,7 @@ function mapScore(row: Row): EvaluationScore {
     evaluatorId: String(row.evaluator_id),
     score: Number(row.score),
     passed: Boolean(row.passed),
+    ...(row.dimension ? { dimension: String(row.dimension) } : {}),
     ...(row.reason ? { reason: String(row.reason) } : {}),
     ...(row.evidence ? { evidence: jsonArray(row.evidence) } : {}),
     ...(row.failed_criteria ? { failedCriteria: jsonArray(row.failed_criteria) } : {}),
@@ -783,6 +882,12 @@ function jsonRecord(value: unknown): Record<string, unknown> {
 function jsonArray(value: unknown): string[] {
   const parsed = jsonValue(value);
   return Array.isArray(parsed) ? parsed.map(String) : [];
+}
+
+/** For jsonb columns holding objects, where `jsonArray`'s stringifying would lose them. */
+function jsonObjectArray<T>(value: unknown): T[] {
+  const parsed = jsonValue(value);
+  return Array.isArray(parsed) ? parsed as T[] : [];
 }
 
 function trajectorySubjectId(subject: EvaluationTrajectorySubject): string {

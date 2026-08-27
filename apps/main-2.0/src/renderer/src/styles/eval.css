@@ -1270,3 +1270,66 @@
 .eval-evaluator-kinds button:disabled { cursor: default; opacity: 0.6; }
 .eval-evaluator-kinds strong { font-size: 11.5px; }
 .eval-evaluator-kinds small { color: var(--text-dim); font-size: 10.5px; line-height: 1.4; }
+
+/* Fields that read as one decision sit on one line. */
+.eval-editor-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.eval-editor-row > .eval-editor-field { flex: 1 1 140px; min-width: 0; }
+
+/* A judge written as code: monospace, and no editor niceties fighting the text. */
+.eval-code-input {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+  line-height: 1.5;
+  tab-size: 2;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+/* Dimension breakdown: what a single score cannot show. */
+.eval-dimension-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.eval-dimension-list li {
+  display: grid;
+  grid-template-columns: minmax(60px, 140px) 1fr auto auto auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+}
+
+.eval-dimension-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.eval-dimension-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border-strong);
+  overflow: hidden;
+}
+
+.eval-dimension-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.eval-dimension-score { font-variant-numeric: tabular-nums; }
+
+.eval-graph-case-score {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 0;
+  font-size: 11.5px;
+}

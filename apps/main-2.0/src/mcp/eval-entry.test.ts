@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 import { PostgresDatabase } from "../core/postgres/database";
 import { POSTGRES_MIGRATIONS } from "../core/postgres/schema";
@@ -6,8 +9,10 @@ import { PGliteTestPool } from "../core/postgres/test-pglite";
 import { EvaluationStore } from "../automation/engine/main/evaluation-store";
 import {
   addEvalDatasetCases,
+  exportEvalDatasetFolder,
   getEvalDataset,
   getEvalRunReport,
+  importEvalDatasetFolder,
   listEvalDatasets,
   listEvalGraphs,
   listEvalRuns,
@@ -198,5 +203,187 @@ describe("evaluation MCP tools", () => {
       steps: [{ node: "judge", status: "excused", reason: "judge_runtime_not_configured" }],
     });
     await expect(getEvalRunReport(store, "missing")).resolves.toBeNull();
+  });
+  it("reports the dimension breakdown, not only the average", async () => {
+    // An agent asked "did the change regress anything" needs to know which
+    // dimension moved; one average cannot answer that.
+    const now = Date.now();
+    const dataset = await writeEvalDataset(store, {
+      name: "Dimensions",
+      description: "",
+      cases: [{ input: "x" }],
+    });
+    await store.saveExperiment({
+      id: "experiment-2",
+      name: "dimension run",
+      datasetId: dataset.id,
+      agentId: "agent-1",
+      evaluatorIds: [],
+      repetitions: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await store.saveRun({
+      id: "run-2",
+      experimentId: "experiment-2",
+      status: "completed",
+      engine: "graph",
+      startedAt: now,
+      scoredCaseCount: 1,
+      unscoredCaseCount: 0,
+      coverage: 0.75,
+      dimensions: [
+        { dimension: "correctness", score: 0.9, weight: 4, scoredCaseCount: 1 },
+        { dimension: "brevity", score: 0.2, weight: 1, scoredCaseCount: 1 },
+      ],
+      results: [{
+        id: "run-2:case-1:1",
+        runId: "run-2",
+        datasetItemId: "case-1",
+        repetition: 1,
+        input: "x",
+        output: "y",
+        durationMs: 1,
+        score: 0.76,
+        passed: true,
+        coverage: 0.75,
+        dimensions: [
+          {
+            dimension: "correctness",
+            score: 0.9,
+            weight: 4,
+            decided: 1,
+            undecided: 0,
+            met: 1,
+            unmet: 0,
+          },
+          {
+            dimension: "brevity",
+            score: 0.2,
+            weight: 1,
+            decided: 1,
+            undecided: 0,
+            met: 0,
+            unmet: 1,
+          },
+        ],
+        skippedEvaluatorIds: ["tool-failures"],
+        scores: [],
+      }],
+    });
+
+    const report = await getEvalRunReport(store, "run-2");
+
+    expect(report).toMatchObject({
+      coverage: 0.75,
+      dimensions: [
+        { dimension: "correctness", score: 0.9, weight: 4 },
+        { dimension: "brevity", score: 0.2, weight: 1 },
+      ],
+    });
+    // Passing with one dimension unmet is exactly the case a per-check reading
+    // would get wrong.
+    expect(report!.cases[0]).toMatchObject({
+      passed: true,
+      score: 0.76,
+      skippedEvaluatorIds: ["tool-failures"],
+      dimensions: [
+        { dimension: "correctness", score: 0.9, met: 1, unmet: 0 },
+        { dimension: "brevity", score: 0.2, met: 0, unmet: 1 },
+      ],
+    });
+  });
+  it("imports a dataset folder and re-imports it as the same dataset", async () => {
+    // Whether an agent or a person edits the files, the folder is the source of
+    // truth; a second import must update rather than pile up a near-copy.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "eval-folder-"));
+    fs.mkdirSync(path.join(root, "cases"));
+    fs.writeFileSync(path.join(root, "dataset.md"), [
+      "---",
+      "name: Login regression",
+      "description: cases about the login flow",
+      "---",
+      "",
+      "# Login regression",
+      "",
+      "Prose here is documentation and is not imported.",
+      "",
+    ].join("\n"), "utf8");
+    fs.writeFileSync(
+      path.join(root, "cases", "001-expired-token.json"),
+      JSON.stringify({ input: "why does login fail?", expectedOutput: "expired token", context: "auth" }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(root, "cases", "002-refresh.json"),
+      JSON.stringify({ input: "how do we refresh it?" }),
+      "utf8",
+    );
+    fs.writeFileSync(path.join(root, "cases", "003-broken.json"), "{ not json", "utf8");
+
+    const imported = await importEvalDatasetFolder(store, root);
+
+    expect(imported).toMatchObject({ name: "Login regression", caseCount: 2 });
+    expect(imported.cases.map((item) => item.input))
+      .toEqual(["why does login fail?", "how do we refresh it?"]);
+    expect(imported.cases[0]!.context).toBe("auth");
+    // Case ids are namespaced by the dataset because the store keys them
+    // globally; the leading number is ordering, not identity, so it is dropped.
+    expect(imported.cases[0]!.id).toBe(`${imported.id}:expired-token`);
+    // A file that could not be read is named, never dropped in silence.
+    expect(imported.errors.join(" ")).toContain("003-broken.json");
+
+    fs.writeFileSync(
+      path.join(root, "cases", "003-broken.json"),
+      JSON.stringify({ input: "and if the refresh fails?" }),
+      "utf8",
+    );
+    const reimported = await importEvalDatasetFolder(store, root);
+
+    expect(reimported.id).toBe(imported.id);
+    expect(reimported.caseCount).toBe(3);
+    expect(await listEvalDatasets(store)).toHaveLength(1);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("exports a dataset as a folder that imports back unchanged", async () => {
+    const created = await writeEvalDataset(store, {
+      name: "Round trip",
+      description: "written by the app",
+      cases: [
+        { input: "first", expectedOutput: "1", context: "counting" },
+        { input: "second" },
+      ],
+    });
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "eval-export-"));
+
+    const written = await exportEvalDatasetFolder(store, "Round trip", root);
+
+    expect(written.caseCount).toBe(2);
+    expect(fs.existsSync(path.join(root, "dataset.md"))).toBe(true);
+    const imported = await importEvalDatasetFolder(store, root);
+    expect(imported.name).toBe("Round trip");
+    expect(imported.cases.map((item) => [item.input, item.expectedOutput, item.context]))
+      .toEqual(created.cases.map((item) => [item.input, item.expectedOutput, item.context]));
+
+    // Exporting the imported copy again must not prefix the case ids a second
+    // time; a file's id is the user's own label for the case.
+    const second = fs.mkdtempSync(path.join(os.tmpdir(), "eval-export-2-"));
+    await exportEvalDatasetFolder(store, imported.id, second);
+    const twice = await importEvalDatasetFolder(store, second);
+    expect(twice.cases.map((item) => item.id.slice(twice.id.length + 1)))
+      .toEqual(imported.cases.map((item) => item.id.slice(imported.id.length + 1)));
+
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(second, { recursive: true, force: true });
+  });
+
+  it("refuses a folder with nothing readable in it", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "eval-empty-"));
+
+    await expect(importEvalDatasetFolder(store, root)).rejects.toThrow();
+    await expect(importEvalDatasetFolder(store, path.join(root, "missing")))
+      .rejects.toThrow();
+    fs.rmSync(root, { recursive: true, force: true });
   });
 });

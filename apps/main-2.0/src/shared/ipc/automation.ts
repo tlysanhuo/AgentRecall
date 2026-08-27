@@ -39,6 +39,8 @@ export const AUTOMATION_CHANNELS = {
   evaluationDatasetList: "automation:evaluation:datasets:list",
   evaluationDatasetSave: "automation:evaluation:datasets:save",
   evaluationDatasetDelete: "automation:evaluation:datasets:delete",
+  evaluationDatasetFolderImport: "automation:evaluation:datasets:folder:import",
+  evaluationDatasetFolderExport: "automation:evaluation:datasets:folder:export",
   evaluationEvaluatorList: "automation:evaluation:evaluators:list",
   evaluationEvaluatorSave: "automation:evaluation:evaluators:save",
   evaluationEvaluatorDelete: "automation:evaluation:evaluators:delete",

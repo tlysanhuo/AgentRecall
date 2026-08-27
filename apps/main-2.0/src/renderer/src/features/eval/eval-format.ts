@@ -1,5 +1,6 @@
 import { localize, type LanguageMode } from "../../language";
 import type { EvaluationNodeRecord } from "../../../../automation/contracts";
+import { evaluationNodeCatalog } from "../../../../core/evaluation/node-catalog";
 
 /**
  * Formatting shared by the Eval pages.
@@ -35,19 +36,27 @@ export function runStatusText(language: LanguageMode, status: string): string {
   return l("Pending", "等待中");
 }
 
-const NODE_LABELS: Record<string, [string, string]> = {
-  task_source: ["Task", "任务"],
-  skill_provision: ["Skill", "Skill 注入"],
-  agent_execute: ["Agent run", "Agent 执行"],
-  session_link: ["Session link", "会话关联"],
+/**
+ * Node types that no longer exist but are recorded in runs already stored.
+ *
+ * A run is history and is never rewritten, so its rows keep naming the node types
+ * that ran at the time; without these a past run would show a raw identifier.
+ */
+const RETIRED_NODE_LABELS: Record<string, [string, string]> = {
+  agent_execute: ["Agent run", "跑模型"],
   evidence_extract: ["Trace", "轨迹提取"],
-  skill_use_observe: ["Skill use", "Skill 使用"],
-  deterministic_judge: ["Check", "确定性判定"],
-  llm_judge: ["LLM judge", "模型评判"],
 };
 
+/**
+ * Labels come from the node catalog rather than a copy kept here, so renaming a
+ * node in the engine cannot leave the run view showing the old name.
+ */
+const NODE_LABELS: Map<string, [string, string]> = new Map(
+  evaluationNodeCatalog().map((entry) => [entry.type, [entry.labelEn, entry.labelZh]]),
+);
+
 export function nodeLabel(language: LanguageMode, node: EvaluationNodeRecord): string {
-  const label = NODE_LABELS[node.nodeType];
+  const label = NODE_LABELS.get(node.nodeType) ?? RETIRED_NODE_LABELS[node.nodeType];
   return label ? localize(language, label[0], label[1]) : node.nodeType;
 }
 

@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
 
+import {
+  datasetFolderCaseId,
+  datasetFolderId,
+  datasetFolderItems,
+  readDatasetFolder,
+  writeDatasetFolder,
+} from "../core/evaluation/dataset-folder-io";
 import { PostgresDatabase, type PostgresPool } from "../core/postgres/database";
 import { EvaluationStore } from "../automation/engine/main/evaluation-store";
 import type {
@@ -58,10 +65,22 @@ export interface EvalMcpRunSummary {
 }
 
 export interface EvalMcpRunReport extends EvalMcpRunSummary {
+  /** Mean coverage of the planned judging over the scored cases. */
+  coverage?: number;
+  /**
+   * Score per dimension across the run. The single average cannot say which
+   * dimension a regression is in, which is usually the question being asked.
+   */
+  dimensions?: Array<{ dimension: string; score: number | null; weight: number }>;
   cases: Array<{
     caseId: string;
     passed: boolean;
+    score?: number;
+    coverage?: number;
+    dimensions?: Array<{ dimension: string; score: number | null; met: number; unmet: number }>;
     unscoredReason?: string;
+    /** Judges this case's source could not run, so their absence is not silent. */
+    skippedEvaluatorIds?: string[];
     sessionKey?: string;
     steps: Array<{ node: string; type: string; status: string; reason?: string }>;
   }>;
@@ -131,6 +150,60 @@ export async function writeEvalDataset(
   const saved = await getEvalDataset(store, id);
   if (!saved) throw new Error(`The dataset was not readable after saving: ${id}`);
   return saved;
+}
+
+/**
+ * Imports a dataset folder from disk.
+ *
+ * This is the half an agent cannot do for itself: it can already write
+ * `dataset.md` and `cases/*.json` with its own file tools — that is what the
+ * format is for — but only the app can take those files into its database. The
+ * id follows the folder, so re-importing after an edit updates the same dataset.
+ */
+export async function importEvalDatasetFolder(
+  store: EvaluationStore,
+  directory: string,
+): Promise<EvalMcpDatasetDetail & { directory: string; errors: string[] }> {
+  const folder = readDatasetFolder(directory);
+  if (folder.cases.length === 0) {
+    throw new Error(folder.errors[0] ?? `No cases were found in: ${directory}`);
+  }
+  const id = datasetFolderId(directory);
+  const existing = (await datasets(store)).find((item) => item.id === id);
+  const now = Date.now();
+  await store.saveDataset({
+    id,
+    name: folder.manifest.name,
+    description: folder.manifest.description,
+    items: datasetFolderItems(id, folder.cases),
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  });
+  const saved = await getEvalDataset(store, id);
+  if (!saved) throw new Error(`The dataset was not readable after importing: ${id}`);
+  return { ...saved, directory, errors: folder.errors };
+}
+
+/** Writes a dataset to disk in the folder format, for reading or editing by hand. */
+export async function exportEvalDatasetFolder(
+  store: EvaluationStore,
+  datasetIdOrName: string,
+  directory: string,
+): Promise<{ directory: string; caseCount: number }> {
+  const dataset = findDataset(await datasets(store), datasetIdOrName);
+  if (!dataset) throw new Error(`Dataset was not found: ${datasetIdOrName}`);
+  const written = writeDatasetFolder(directory, {
+    name: dataset.name,
+    description: dataset.description,
+    cases: dataset.items.map((item) => ({
+      id: datasetFolderCaseId(dataset.id, item.id),
+      input: item.input,
+      ...(item.expectedOutput !== undefined ? { expectedOutput: item.expectedOutput } : {}),
+      ...(typeof item.metadata.context === "string" ? { context: item.metadata.context } : {}),
+      metadata: item.metadata,
+    })),
+  });
+  return { directory, caseCount: written.caseCount };
 }
 
 export async function addEvalDatasetCases(
@@ -214,13 +287,41 @@ export async function getEvalRunReport(
     ...(run.averageScore !== undefined ? { averageScore: run.averageScore } : {}),
     ...(run.scoredCaseCount !== undefined ? { scoredCaseCount: run.scoredCaseCount } : {}),
     ...(run.unscoredCaseCount !== undefined ? { unscoredCaseCount: run.unscoredCaseCount } : {}),
+    ...(run.coverage !== undefined ? { coverage: run.coverage } : {}),
+    ...(run.dimensions
+      ? {
+          dimensions: run.dimensions.map((dimension) => ({
+            dimension: dimension.dimension,
+            score: dimension.score,
+            weight: dimension.weight,
+          })),
+        }
+      : {}),
     cases: run.results.map((result) => ({
       caseId: result.id,
-      passed: result.unscoredReason === undefined
-        && result.gatePassed !== false
+      // The dimension-weighted verdict when the run recorded one; a case can
+      // clear its threshold with one check unmet.
+      passed: result.unscoredReason === undefined && (result.passed ?? (
+        result.gatePassed !== false
         && result.scores.length > 0
-        && result.scores.every((score) => score.passed),
+        && result.scores.every((score) => score.passed)
+      )),
+      ...(result.score !== undefined ? { score: result.score } : {}),
+      ...(result.coverage !== undefined ? { coverage: result.coverage } : {}),
+      ...(result.dimensions
+        ? {
+            dimensions: result.dimensions.map((dimension) => ({
+              dimension: dimension.dimension,
+              score: dimension.score,
+              met: dimension.met,
+              unmet: dimension.unmet,
+            })),
+          }
+        : {}),
       ...(result.unscoredReason ? { unscoredReason: result.unscoredReason } : {}),
+      ...(result.skippedEvaluatorIds && result.skippedEvaluatorIds.length > 0
+        ? { skippedEvaluatorIds: result.skippedEvaluatorIds }
+        : {}),
       ...(result.sessionKey ? { sessionKey: result.sessionKey } : {}),
       steps: (result.nodes ?? []).map((node) => ({
         node: node.nodeId,

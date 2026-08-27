@@ -98,9 +98,8 @@ describe("EvalGraphEditor", () => {
     expect(canvasNodeLabels()).toEqual([
       "任务",
       "Skill 注入",
-      "Agent 执行",
+      "跑模型",
       "会话关联",
-      "轨迹提取",
       "Skill 使用",
     ]);
     expect(container.textContent ?? "").toContain("校验通过");
@@ -119,7 +118,7 @@ describe("EvalGraphEditor", () => {
             { id: "skill", type: "skill_provision", config: {} },
             {
               id: "agent",
-              type: "agent_execute",
+              type: "run_agent",
               config: { agentId: "agent-1" },
               in: { task: "task.task", instructions: "skill.instructions" },
             },
@@ -130,7 +129,7 @@ describe("EvalGraphEditor", () => {
     }));
 
     // The derived shape includes session linkage; the saved one does not.
-    expect(canvasNodeLabels()).toEqual(["任务", "Skill 注入", "Agent 执行"]);
+    expect(canvasNodeLabels()).toEqual(["任务", "Skill 注入", "跑模型"]);
     expect(saveButton().disabled).toBe(false);
   });
 
@@ -147,8 +146,8 @@ describe("EvalGraphEditor", () => {
               id: "judge",
               type: "llm_judge",
               config: { evaluatorId: "judge-1" },
-              // A judge fed the task where it expects the agent's execution.
-              in: { task: "task.task", execution: "task.task" },
+              // A judge fed the task where it expects the artifact.
+              in: { task: "task.task", artifact: "task.task" },
             },
           ],
         },
@@ -175,5 +174,39 @@ describe("EvalGraphEditor", () => {
     expect(Object.keys(saved.graph?.layout ?? {}).sort())
       .toEqual(saved.graph!.spec.nodes.map((node) => node.id).sort());
     expect(onSaved).toHaveBeenCalledWith(saved);
+  });
+  it("saves the evaluators the canvas judges with, and the source it reads", async () => {
+    // The experiment's evaluator list is what the runner filters judges by, so a
+    // judge added on the canvas has to end up in it or it would be disabled at
+    // run time for not being in a list the editor never showed.
+    await render(experiment({
+      graph: {
+        version: 1,
+        spec: {
+          name: "authored",
+          version: 1,
+          nodes: [
+            { id: "task", type: "task_source", config: {} },
+            { id: "source", type: "session_artifact", in: { task: "task.task" } },
+            {
+              id: "judge",
+              type: "llm_judge",
+              config: { evaluatorId: "judge-1", threshold: 0.6, prompt: "", runtimeId: "claude" },
+              in: { task: "task.task", artifact: "source.artifact" },
+            },
+          ],
+        },
+        layout: {},
+      },
+    }));
+
+    await act(async () => {
+      saveButton().click();
+    });
+
+    expect(harness.saveExperiment).toHaveBeenCalledWith(expect.objectContaining({
+      evaluatorIds: ["judge-1"],
+      source: "session",
+    }));
   });
 });

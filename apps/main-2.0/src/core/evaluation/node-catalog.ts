@@ -3,8 +3,9 @@ import { createEvaluationNodeDefinitions } from "./case-graph";
 import type { EvaluationNodeRole } from "./graph/node";
 import type { EvaluationPortMap } from "./graph/ports";
 import {
-  AGENT_EXECUTE_NODE_TYPE,
-  EVIDENCE_EXTRACT_NODE_TYPE,
+  FOLDER_ARTIFACT_NODE_TYPE,
+  RUN_AGENT_NODE_TYPE,
+  SESSION_ARTIFACT_NODE_TYPE,
   SESSION_LINK_NODE_TYPE,
   SKILL_PROVISION_NODE_TYPE,
   SKILL_USE_OBSERVE_NODE_TYPE,
@@ -13,6 +14,9 @@ import {
 import {
   DETERMINISTIC_JUDGE_NODE_TYPE,
   LLM_JUDGE_NODE_TYPE,
+  SCRIPT_JUDGE_NODE_TYPE,
+  SCRIPT_TRAJECTORY_JUDGE_NODE_TYPE,
+  TOOL_FAILURE_JUDGE_NODE_TYPE,
 } from "./nodes/judge-nodes";
 
 /**
@@ -72,6 +76,10 @@ interface CatalogPresentation {
   configuredPerCase?: boolean;
 }
 
+const DIMENSION_FIELDS: EvaluationConfigFieldDescriptor[] = [
+  { key: "evaluatorId", kind: "evaluator", required: true, labelEn: "Evaluator", labelZh: "评分器" },
+];
+
 const PRESENTATION: Record<string, CatalogPresentation> = {
   [TASK_SOURCE_NODE_TYPE]: {
     labelEn: "Task",
@@ -90,11 +98,11 @@ const PRESENTATION: Record<string, CatalogPresentation> = {
       { key: "skillName", kind: "skill", required: false, labelEn: "Skill", labelZh: "Skill" },
     ],
   },
-  [AGENT_EXECUTE_NODE_TYPE]: {
-    labelEn: "Agent run",
-    labelZh: "Agent 执行",
-    descriptionEn: "Runs the evaluated Agent once on the task.",
-    descriptionZh: "让被评测 Agent 执行一次任务。",
+  [RUN_AGENT_NODE_TYPE]: {
+    labelEn: "Run agent",
+    labelZh: "跑模型",
+    descriptionEn: "Produces the artifact by running the agent once on the task.",
+    descriptionZh: "让 Agent 执行一次任务，产出被评测的产物。",
     configFields: [
       { key: "agentId", kind: "agent", required: true, labelEn: "Agent", labelZh: "Agent" },
     ],
@@ -102,19 +110,28 @@ const PRESENTATION: Record<string, CatalogPresentation> = {
   [SESSION_LINK_NODE_TYPE]: {
     labelEn: "Session link",
     labelZh: "会话关联",
-    descriptionEn: "Links the run to the session it produced, waiting for indexing.",
-    descriptionZh: "把运行关联到它产生的会话，会等待索引完成。",
+    descriptionEn: "Finds the session a fresh run produced, yielding its trajectory.",
+    descriptionZh: "找到本次运行产生的会话，取出它的轨迹。",
     configFields: [
       { key: "attempts", kind: "number", required: false, labelEn: "Attempts", labelZh: "重试次数" },
       { key: "delayMs", kind: "number", required: false, labelEn: "Delay (ms)", labelZh: "间隔（毫秒）" },
     ],
   },
-  [EVIDENCE_EXTRACT_NODE_TYPE]: {
-    labelEn: "Trace",
-    labelZh: "轨迹提取",
-    descriptionEn: "Reads the linked session's turns, tool calls and usage.",
-    descriptionZh: "读取关联会话的轮次、工具调用与用量。",
+  [SESSION_ARTIFACT_NODE_TYPE]: {
+    labelEn: "Session artifact",
+    labelZh: "已有会话",
+    descriptionEn: "Evaluates a session that already happened; nothing is re-run.",
+    descriptionZh: "评测已经发生过的会话，不重跑任何东西。",
     configFields: [],
+    configuredPerCase: true,
+  },
+  [FOLDER_ARTIFACT_NODE_TYPE]: {
+    labelEn: "Folder artifact",
+    labelZh: "产物文件夹",
+    descriptionEn: "Evaluates a folder on disk. A folder has no trajectory.",
+    descriptionZh: "评测磁盘上的产物目录。文件夹没有轨迹。",
+    configFields: [],
+    configuredPerCase: true,
   },
   [SKILL_USE_OBSERVE_NODE_TYPE]: {
     labelEn: "Skill use",
@@ -126,20 +143,37 @@ const PRESENTATION: Record<string, CatalogPresentation> = {
   [DETERMINISTIC_JUDGE_NODE_TYPE]: {
     labelEn: "Check",
     labelZh: "确定性判定",
-    descriptionEn: "Exact match, substring or JSON shape. No model involved.",
-    descriptionZh: "精确匹配、包含或 JSON 合法性判定，不调用模型。",
-    configFields: [
-      { key: "evaluatorId", kind: "evaluator", required: true, labelEn: "Evaluator", labelZh: "评分器" },
-    ],
+    descriptionEn: "Exact match, substring or JSON shape on the artifact. No model involved.",
+    descriptionZh: "对产物做精确匹配、包含或 JSON 合法性判定，不调用模型。",
+    configFields: DIMENSION_FIELDS,
   },
   [LLM_JUDGE_NODE_TYPE]: {
     labelEn: "LLM judge",
     labelZh: "模型评判",
-    descriptionEn: "Scores the answer with a judge model.",
-    descriptionZh: "用评判模型给答案打分。",
-    configFields: [
-      { key: "evaluatorId", kind: "evaluator", required: true, labelEn: "Evaluator", labelZh: "评分器" },
-    ],
+    descriptionEn: "Scores the artifact with a judge model, on one dimension.",
+    descriptionZh: "用评判模型给产物打分，归属一个维度。",
+    configFields: DIMENSION_FIELDS,
+  },
+  [TOOL_FAILURE_JUDGE_NODE_TYPE]: {
+    labelEn: "Tool failures",
+    labelZh: "工具失败",
+    descriptionEn: "Decides on the trajectory: how many tool calls failed.",
+    descriptionZh: "对轨迹判定：有多少工具调用失败。",
+    configFields: DIMENSION_FIELDS,
+  },
+  [SCRIPT_JUDGE_NODE_TYPE]: {
+    labelEn: "Script judge",
+    labelZh: "脚本评判",
+    descriptionEn: "Scores the artifact with your own code, inline or a command.",
+    descriptionZh: "用你自己的代码给产物打分，可写内联 JS 或调用外部命令。",
+    configFields: DIMENSION_FIELDS,
+  },
+  [SCRIPT_TRAJECTORY_JUDGE_NODE_TYPE]: {
+    labelEn: "Script judge (trajectory)",
+    labelZh: "脚本评判（轨迹）",
+    descriptionEn: "Scores how the work was done with your own code.",
+    descriptionZh: "用你自己的代码给做事过程打分。",
+    configFields: DIMENSION_FIELDS,
   },
 };
 
@@ -153,7 +187,7 @@ const PRESENTATION: Record<string, CatalogPresentation> = {
 export function createEvaluationValidationRegistry(): EvaluationNodeRegistry {
   return createEvaluationNodeRegistry(
     createEvaluationNodeDefinitions({
-      executeAgent: () => {
+      runAgent: () => {
         throw new Error("The validation registry cannot execute nodes.");
       },
     }),

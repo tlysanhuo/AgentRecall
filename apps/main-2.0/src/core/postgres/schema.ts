@@ -1748,4 +1748,40 @@ export const POSTGRES_MIGRATIONS: readonly PostgresMigration[] = [{
         ADD COLUMN IF NOT EXISTS graph jsonb;
     `,
   ],
+}, {
+  version: 44,
+  name: "store evaluation dimensions, artifact source and script judges",
+  statements: [
+    `
+      ALTER TABLE agent_recall.evaluation_evaluators
+        ADD COLUMN IF NOT EXISTS dimension text,
+        ADD COLUMN IF NOT EXISTS priority text,
+        ADD COLUMN IF NOT EXISTS max_tool_failures integer,
+        ADD COLUMN IF NOT EXISTS script_mode text,
+        ADD COLUMN IF NOT EXISTS script text,
+        ADD COLUMN IF NOT EXISTS command text,
+        ADD COLUMN IF NOT EXISTS command_args jsonb,
+        ADD COLUMN IF NOT EXISTS subject text,
+        ADD COLUMN IF NOT EXISTS timeout_ms integer;
+
+      ALTER TABLE agent_recall.evaluation_experiments
+        ADD COLUMN IF NOT EXISTS source text,
+        ADD COLUMN IF NOT EXISTS scoring jsonb;
+
+      ALTER TABLE agent_recall.evaluation_scores
+        ADD COLUMN IF NOT EXISTS dimension text;
+
+      ALTER TABLE agent_recall.evaluation_case_results
+        ADD COLUMN IF NOT EXISTS score double precision,
+        ADD COLUMN IF NOT EXISTS passed boolean,
+        ADD COLUMN IF NOT EXISTS coverage double precision,
+        ADD COLUMN IF NOT EXISTS dimensions jsonb,
+        ADD COLUMN IF NOT EXISTS by_label jsonb,
+        ADD COLUMN IF NOT EXISTS skipped_evaluator_ids jsonb;
+
+      ALTER TABLE agent_recall.evaluation_runs
+        ADD COLUMN IF NOT EXISTS coverage double precision,
+        ADD COLUMN IF NOT EXISTS dimensions jsonb;
+    `,
+  ],
 }];

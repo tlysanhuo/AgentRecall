@@ -165,4 +165,55 @@ describe("EvalEvaluatorsPage", () => {
     expect(harness.saveEvaluator).toHaveBeenCalledTimes(1);
     expect(harness.saveEvaluator.mock.calls[0]![0]).toMatchObject({ enabled: true });
   });
+  it("offers judge code and a subject only for a script evaluator", async () => {
+    harness.listEvaluators.mockResolvedValue([
+      evaluator({
+        id: "script-1",
+        name: "Answer length",
+        kind: "script",
+        scriptMode: "inline_js",
+        script: "return { score: 1 };",
+        subject: "artifact",
+      }),
+    ]);
+    await render();
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("评判代码");
+    // The sandbox boundary is the reason a script judge is safe to paste in, so
+    // the form has to state it.
+    expect(text).toContain("没有文件系统、网络和模块");
+    expect((container.querySelector(".eval-code-input") as HTMLTextAreaElement).value)
+      .toBe("return { score: 1 };");
+  });
+
+  it("says a command judge needs the setting turned on", async () => {
+    harness.listEvaluators.mockResolvedValue([
+      evaluator({ id: "script-1", name: "External", kind: "script", scriptMode: "command", command: "./judge.sh" }),
+    ]);
+    await render();
+
+    expect(container.textContent).toContain("只有在设置里允许外部脚本评判时命令才会执行");
+    expect(container.querySelector(".eval-code-input")).toBeNull();
+  });
+
+  it("saves the dimension a verdict belongs to", async () => {
+    // Two checks sharing a dimension must not double that dimension's say, which
+    // is only possible if the dimension is authored here.
+    await render();
+    const field = [...container.querySelectorAll("label")]
+      .find((item) => item.textContent?.includes("维度"))!
+      .querySelector("input") as HTMLInputElement;
+
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(field, "正确性");
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      button("保存").click();
+    });
+
+    expect(harness.saveEvaluator.mock.calls[0]![0]).toMatchObject({ dimension: "正确性" });
+  });
 });
