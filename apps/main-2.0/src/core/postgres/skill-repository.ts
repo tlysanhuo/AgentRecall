@@ -295,6 +295,34 @@ export class PostgresSkillRepository {
     }));
   }
 
+  /**
+   * Skill names the usage hook recorded inside one session, newest first.
+   *
+   * Returns an empty list both when no skill was used and when nothing was
+   * observable — the hook may not be installed for the agent that ran. Callers
+   * that report "unused" to a user must check observability separately rather
+   * than reading emptiness as a negative result.
+   */
+  async listSkillTriggersForSession(sessionKey: string): Promise<string[]> {
+    const result = await this.database.query<{ skill: string }>(
+      `
+        select distinct events.skill
+        from agent_recall.skill_usage_events events
+        join agent_recall.sessions sessions
+          on (
+            events.session_id is not null
+            and sessions.raw_id = events.session_id
+            and sessions.storage_environment_id = 'local'
+          )
+          or sessions.file_path = events.source_path
+        where sessions.session_key = $1
+        order by events.skill
+      `,
+      [sessionKey],
+    );
+    return result.rows.map((row) => row.skill);
+  }
+
   // Trigger-layer stats per skill name (case-insensitive), newest first.
   // "linked" counts events that resolve to an indexed session by either
   // linkage route used in listRecentSkillTriggers.

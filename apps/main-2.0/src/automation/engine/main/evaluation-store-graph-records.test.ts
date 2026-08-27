@@ -1,0 +1,218 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import { PostgresDatabase } from "../../../core/postgres/database";
+import { POSTGRES_MIGRATIONS } from "../../../core/postgres/schema";
+import { PGliteTestPool } from "../../../core/postgres/test-pglite";
+import { EvaluationStore } from "./evaluation-store";
+import type { EvaluationRun } from "../shared/evaluation/types";
+
+describe("PostgreSQL evaluation store graph records", () => {
+  let database: PostgresDatabase;
+  let store: EvaluationStore;
+
+  beforeEach(async () => {
+    database = new PostgresDatabase(new PGliteTestPool(), {
+      migrationLock: false,
+      migrations: POSTGRES_MIGRATIONS,
+    });
+    await database.initialize();
+    store = new EvaluationStore(database);
+    const now = Date.now();
+    await store.saveDataset({
+      id: "dataset-1",
+      name: "cases",
+      description: "",
+      items: [],
+      createdAt: now,
+      updatedAt: now,
+    });
+    await store.saveExperiment({
+      id: "experiment-1",
+      name: "graph regression",
+      datasetId: "dataset-1",
+      agentId: "agent-1",
+      evaluatorIds: [],
+      repetitions: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+  });
+
+  afterEach(async () => {
+    await database.close();
+  });
+
+  function graphRun(): EvaluationRun {
+    return {
+      id: "run-1",
+      experimentId: "experiment-1",
+      status: "completed",
+      engine: "graph",
+      startedAt: 1,
+      finishedAt: 2,
+      averageScore: 0.75,
+      minimumScore: 0.5,
+      passRate: 0.5,
+      scoredCaseCount: 2,
+      unscoredCaseCount: 1,
+      totalDurationMs: 100,
+      results: [
+        {
+          id: "run-1:item-1:1",
+          runId: "run-1",
+          datasetItemId: "item-1",
+          repetition: 1,
+          input: "question",
+          expectedOutput: "4",
+          output: "4",
+          durationMs: 20,
+          gatePassed: true,
+          sessionKey: "claude:thread-9",
+          skillInjection: { skillName: "review", skillHash: "hash-1", contentLength: 42 },
+          scores: [
+            { evaluatorId: "exact", score: 1, passed: true, durationMs: 1 },
+          ],
+          nodes: [
+            {
+              nodeId: "agent",
+              nodeType: "agent_execute",
+              nodeVersion: 1,
+              role: "prepare",
+              status: "pass",
+              startedAt: 10,
+              finishedAt: 20,
+              durationMs: 10,
+              producedOutputs: ["execution"],
+              facts: { outputLength: 1 },
+            },
+            {
+              nodeId: "session",
+              nodeType: "session_link",
+              nodeVersion: 1,
+              role: "prepare",
+              status: "excused",
+              attribution: {
+                type: "infra_failure",
+                reason: "session_not_indexed",
+                details: ["waited 3s"],
+              },
+            },
+            {
+              nodeId: "judge-exact",
+              nodeType: "deterministic_judge",
+              nodeVersion: 1,
+              role: "judge",
+              status: "pass",
+              durationMs: 1,
+              verdicts: [
+                {
+                  verdictId: "judge-exact:exact",
+                  evaluatorId: "exact",
+                  labels: { dimension: "output" },
+                  status: "met",
+                  raw: 1,
+                  threshold: 1,
+                  reason: "output matched the expected value",
+                  evidence: ["says 4"],
+                  sourceNodeId: "judge-exact",
+                  sourceNodeType: "deterministic_judge",
+                  durationMs: 1,
+                },
+              ],
+            },
+            {
+              nodeId: "skill-use",
+              nodeType: "skill_use_observe",
+              nodeVersion: 1,
+              role: "prepare",
+              status: "pending",
+              pendingReason: "upstream_not_pass",
+              pendingUpstream: ["evidence"],
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  it("round-trips node records, verdicts and the session link", async () => {
+    await store.saveRun(graphRun());
+
+    const loaded = await store.getRun("run-1");
+
+    expect(loaded).toMatchObject({
+      engine: "graph",
+      scoredCaseCount: 2,
+      unscoredCaseCount: 1,
+    });
+    const [result] = loaded!.results;
+    expect(result).toMatchObject({
+      sessionKey: "claude:thread-9",
+      gatePassed: true,
+      skillInjection: { skillName: "review", skillHash: "hash-1", contentLength: 42 },
+    });
+    expect(result!.nodes?.map((node) => node.nodeId)).toEqual([
+      "agent",
+      "session",
+      "judge-exact",
+      "skill-use",
+    ]);
+    expect(result!.nodes?.[1]).toMatchObject({
+      status: "excused",
+      attribution: {
+        type: "infra_failure",
+        reason: "session_not_indexed",
+        details: ["waited 3s"],
+      },
+    });
+    expect(result!.nodes?.[2]!.verdicts).toEqual(graphRun().results[0]!.nodes![2]!.verdicts);
+    expect(result!.nodes?.[3]).toMatchObject({
+      status: "pending",
+      pendingReason: "upstream_not_pass",
+      pendingUpstream: ["evidence"],
+    });
+  });
+
+  it("replaces the previous node records when a run snapshot is saved again", async () => {
+    // Progress snapshots re-save the whole run, so a case must not accumulate
+    // duplicate node rows as it advances.
+    await store.saveRun(graphRun());
+    await store.saveRun(graphRun());
+
+    const loaded = await store.getRun("run-1");
+
+    expect(loaded!.results[0]!.nodes).toHaveLength(4);
+    expect(loaded!.results[0]!.nodes?.[2]!.verdicts).toHaveLength(1);
+  });
+
+  it("keeps a run recorded before the graph engine readable", async () => {
+    await store.saveRun({
+      id: "run-legacy",
+      experimentId: "experiment-1",
+      status: "completed",
+      startedAt: 1,
+      finishedAt: 2,
+      averageScore: 1,
+      passRate: 1,
+      results: [
+        {
+          id: "run-legacy:item-1:1",
+          runId: "run-legacy",
+          datasetItemId: "item-1",
+          repetition: 1,
+          input: "question",
+          output: "4",
+          durationMs: 5,
+          scores: [{ evaluatorId: "exact", score: 1, passed: true, durationMs: 1 }],
+        },
+      ],
+    });
+
+    const loaded = await store.getRun("run-legacy");
+
+    expect(loaded!.engine).toBeUndefined();
+    expect(loaded!.results[0]!.nodes).toBeUndefined();
+    expect(loaded!.results[0]!.sessionKey).toBeUndefined();
+    expect(loaded!.results[0]!.scores).toHaveLength(1);
+  });
+});

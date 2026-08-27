@@ -84,8 +84,8 @@ function fixture(options: {
     agent(),
     agent({ id: "judge-agent", name: "Judge", channelId: "judge-channel", currentRevisionId: undefined }),
   ];
-  const executeAgent = options.executeAgent ?? vi.fn(async (agentId: string) => ({
-    output: agentId === "judge-agent" ? '{"score":0.9,"reason":"clear"}' : "subject output",
+  const executeAgent = options.executeAgent ?? vi.fn(async (input: { configuredAgentId: string }) => ({
+    output: input.configuredAgentId === "judge-agent" ? '{"score":0.9,"reason":"clear"}' : "subject output",
     durationMs: 5,
   }));
   return {
@@ -112,14 +112,12 @@ describe("EvaluationService", () => {
 
     expect(executeAgent).toHaveBeenNthCalledWith(
       1,
-      "target-agent",
-      "Explain the result",
+      { configuredAgentId: "target-agent", prompt: "Explain the result" },
       expect.any(AbortSignal),
     );
     expect(executeAgent).toHaveBeenNthCalledWith(
       2,
-      "judge-agent",
-      expect.stringContaining("subject output"),
+      { configuredAgentId: "judge-agent", prompt: expect.stringContaining("subject output") },
       expect.any(AbortSignal),
     );
     expect(saveRun).toHaveBeenCalledWith(expect.objectContaining({
@@ -159,8 +157,7 @@ describe("EvaluationService", () => {
 
     await expect(service.runExperiment("experiment-1")).resolves.toMatchObject({ passRate: 1 });
     expect(executeAgent).toHaveBeenCalledWith(
-      "judge-agent",
-      expect.any(String),
+      { configuredAgentId: "judge-agent", prompt: expect.any(String) },
       expect.any(AbortSignal),
     );
   });
@@ -257,8 +254,8 @@ describe("EvaluationService", () => {
 
     it("cancelRun aborts the active run, which finalizes as cancelled", async () => {
       const { service, store } = fixture({
-        executeAgent: vi.fn(async (agentId: string, _prompt: string, signal?: AbortSignal) => {
-          if (agentId !== "target-agent") {
+        executeAgent: vi.fn(async (input: { configuredAgentId: string }, signal?: AbortSignal) => {
+          if (input.configuredAgentId !== "target-agent") {
             return { output: '{"score":0.9,"reason":"clear"}', durationMs: 1 };
           }
           // Block until the abort signal fires, like a real agent conversation.
@@ -287,8 +284,8 @@ describe("EvaluationService", () => {
       let targetSignal: AbortSignal | undefined;
       let releaseSave: (() => void) | undefined;
       const { service, store } = fixture({
-        executeAgent: vi.fn(async (agentId: string, _prompt: string, signal?: AbortSignal) => {
-          if (agentId !== "target-agent") {
+        executeAgent: vi.fn(async (input: { configuredAgentId: string }, signal?: AbortSignal) => {
+          if (input.configuredAgentId !== "target-agent") {
             return { output: '{"score":0.9,"reason":"clear"}', durationMs: 1 };
           }
           targetSignal = signal;
@@ -329,8 +326,8 @@ describe("EvaluationService", () => {
       let targetSignal: AbortSignal | undefined;
       let releaseCancelledSave: (() => void) | undefined;
       const { service, store } = fixture({
-        executeAgent: vi.fn(async (agentId: string, _prompt: string, signal?: AbortSignal) => {
-          if (agentId !== "target-agent") {
+        executeAgent: vi.fn(async (input: { configuredAgentId: string }, signal?: AbortSignal) => {
+          if (input.configuredAgentId !== "target-agent") {
             return { output: '{"score":0.9,"reason":"clear"}', durationMs: 1 };
           }
           targetSignal = signal;

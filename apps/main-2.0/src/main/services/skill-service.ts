@@ -1192,6 +1192,34 @@ export class SkillService {
     this.requireEvaluationService().cancelRun(id);
   }
 
+  /**
+   * SKILL.md text and fingerprint of an installed skill, for evaluation runs
+   * that inject a skill's instructions along with the task.
+   *
+   * Content and hash are read from the same bytes in one pass, so a run can
+   * never be attributed to a version other than the one it received.
+   */
+  async readSkillInstructions(
+    skillName: string,
+  ): Promise<{ content: string; hash: string } | null> {
+    const name = skillName.trim();
+    if (!name) return null;
+    const installedSnapshot = await this.listSkills();
+    const installed = installedSnapshot.skills.find(
+      (item) => item.name.trim().toLowerCase() === name.toLowerCase(),
+    );
+    if (!installed) return null;
+    try {
+      const bytes = fs.readFileSync(installed.path);
+      return {
+        content: bytes.toString("utf8"),
+        hash: createHash("sha256").update(bytes).digest("hex"),
+      };
+    } catch {
+      return null;
+    }
+  }
+
   // Same invariant as skillMarkdownHash in bin/skill-usage-record.cjs and
   // getSkillEvalDetail above: sha256 over the raw SKILL.md bytes.
   private async currentSkillHash(skillName: string): Promise<string | null> {

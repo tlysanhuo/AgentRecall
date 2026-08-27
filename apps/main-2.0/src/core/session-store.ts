@@ -695,6 +695,11 @@ export class SessionStore {
     return this.skills.listRecentSkillTriggers(options);
   }
 
+  async listSkillTriggersForSession(sessionKey: string): Promise<string[]> {
+    await this.ready;
+    return this.skills.listSkillTriggersForSession(sessionKey);
+  }
+
   async listSkillUsageOverview(): Promise<SkillUsageOverviewRow[]> {
     await this.ready;
     return this.skills.listSkillUsageOverview();

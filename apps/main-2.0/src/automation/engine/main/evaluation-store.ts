@@ -4,10 +4,12 @@ import type {
   EvaluationDataset,
   EvaluationEvaluator,
   EvaluationExperiment,
+  EvaluationNodeRecord,
   EvaluationRun,
   EvaluationRunPage,
   EvaluationRunSummary,
   EvaluationScore,
+  EvaluationVerdict,
   ListEvaluationRunsRequest,
 } from "../shared/evaluation/types";
 
@@ -270,8 +272,9 @@ export class EvaluationStore {
       await transaction.query(
         `insert into agent_recall.evaluation_runs (
           id, experiment_id, status, agent_revision_id, skill_hash, started_at, finished_at,
-          average_score, minimum_score, pass_rate, total_duration_ms, error
-        ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          average_score, minimum_score, pass_rate, total_duration_ms, error,
+          engine, scored_case_count, unscored_case_count
+        ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         on conflict (id) do update set
           status = excluded.status,
           finished_at = excluded.finished_at,
@@ -280,6 +283,9 @@ export class EvaluationStore {
           pass_rate = excluded.pass_rate,
           total_duration_ms = excluded.total_duration_ms,
           error = excluded.error,
+          engine = excluded.engine,
+          scored_case_count = excluded.scored_case_count,
+          unscored_case_count = excluded.unscored_case_count,
           skill_hash = coalesce(agent_recall.evaluation_runs.skill_hash, excluded.skill_hash)`,
         [
           value.id,
@@ -294,6 +300,9 @@ export class EvaluationStore {
           value.passRate ?? null,
           value.totalDurationMs ?? null,
           value.error ?? null,
+          value.engine ?? null,
+          value.scoredCaseCount ?? null,
+          value.unscoredCaseCount ?? null,
         ],
       );
       await transaction.query(
@@ -416,7 +425,7 @@ export class EvaluationStore {
   }
 
   private async run(row: Row): Promise<EvaluationRun> {
-    const [caseRows, scoreRows] = await Promise.all([
+    const [caseRows, scoreRows, nodeRows, verdictRows] = await Promise.all([
       this.database.query(
         `select *
            from agent_recall.evaluation_case_results
@@ -433,6 +442,24 @@ export class EvaluationStore {
           order by s.case_result_id, s.evaluator_id`,
         [row.id],
       ),
+      this.database.query(
+        `select n.*
+           from agent_recall.evaluation_case_nodes n
+           join agent_recall.evaluation_case_results c
+             on c.id = n.case_result_id
+          where c.run_id = $1
+          order by n.case_result_id, n.sequence`,
+        [row.id],
+      ),
+      this.database.query(
+        `select v.*
+           from agent_recall.evaluation_case_verdicts v
+           join agent_recall.evaluation_case_results c
+             on c.id = v.case_result_id
+          where c.run_id = $1
+          order by v.case_result_id, v.node_id, v.sequence`,
+        [row.id],
+      ),
     ]);
     const scoresByCase = new Map<string, EvaluationScore[]>();
     for (const score of scoreRows.rows) {
@@ -441,18 +468,56 @@ export class EvaluationStore {
       scores.push(mapScore(score));
       scoresByCase.set(caseId, scores);
     }
-    const results = caseRows.rows.map((result): EvaluationCaseResult => ({
-      id: String(result.id),
-      runId: String(result.run_id),
-      datasetItemId: String(result.dataset_item_id),
-      repetition: Number(result.repetition),
-      input: String(result.input),
-      ...(result.expected_output ? { expectedOutput: String(result.expected_output) } : {}),
-      output: String(result.output),
-      ...(result.error ? { error: String(result.error) } : {}),
-      durationMs: Number(result.duration_ms),
-      scores: scoresByCase.get(String(result.id)) ?? [],
-    }));
+    // Keyed by case and then node rather than by a joined string: case ids
+    // already contain the separator characters an id key would need.
+    const verdictsByCaseNode = new Map<string, Map<string, EvaluationVerdict[]>>();
+    for (const verdict of verdictRows.rows) {
+      const caseId = String(verdict.case_result_id);
+      const byNode = verdictsByCaseNode.get(caseId) ?? new Map<string, EvaluationVerdict[]>();
+      const nodeId = String(verdict.node_id);
+      byNode.set(nodeId, [...(byNode.get(nodeId) ?? []), mapVerdict(verdict)]);
+      verdictsByCaseNode.set(caseId, byNode);
+    }
+    const nodesByCase = new Map<string, EvaluationNodeRecord[]>();
+    for (const node of nodeRows.rows) {
+      const caseId = String(node.case_result_id);
+      const nodes = nodesByCase.get(caseId) ?? [];
+      nodes.push(mapNodeRecord(
+        node,
+        verdictsByCaseNode.get(caseId)?.get(String(node.node_id)) ?? [],
+      ));
+      nodesByCase.set(caseId, nodes);
+    }
+    const results = caseRows.rows.map((result): EvaluationCaseResult => {
+      const nodes = nodesByCase.get(String(result.id)) ?? [];
+      return {
+        id: String(result.id),
+        runId: String(result.run_id),
+        datasetItemId: String(result.dataset_item_id),
+        repetition: Number(result.repetition),
+        input: String(result.input),
+        ...(result.expected_output ? { expectedOutput: String(result.expected_output) } : {}),
+        output: String(result.output),
+        ...(result.error ? { error: String(result.error) } : {}),
+        durationMs: Number(result.duration_ms),
+        scores: scoresByCase.get(String(result.id)) ?? [],
+        // Absent on runs recorded before the graph engine; those keep only the
+        // case and score rows they were written with.
+        ...(nodes.length > 0 ? { nodes } : {}),
+        ...(result.session_key ? { sessionKey: String(result.session_key) } : {}),
+        ...(result.skill_name && result.skill_hash
+          ? {
+              skillInjection: {
+                skillName: String(result.skill_name),
+                skillHash: String(result.skill_hash),
+                contentLength: Number(result.skill_content_length ?? 0),
+              },
+            }
+          : {}),
+        ...(result.unscored_reason ? { unscoredReason: String(result.unscored_reason) } : {}),
+        ...(typeof result.gate_passed === "boolean" ? { gatePassed: result.gate_passed } : {}),
+      };
+    });
     const {
       resultCount: _resultCount,
       failedResultCount: _failedResultCount,
@@ -469,8 +534,9 @@ export class EvaluationStore {
     await transaction.query(
       `insert into agent_recall.evaluation_case_results (
         id, run_id, dataset_item_id, repetition, input, expected_output,
-        output, error, duration_ms
-      ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        output, error, duration_ms, session_key, skill_name, skill_hash,
+        skill_content_length, unscored_reason, gate_passed
+      ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
       [
         result.id,
         runId,
@@ -481,8 +547,15 @@ export class EvaluationStore {
         result.output,
         result.error ?? null,
         result.durationMs,
+        result.sessionKey ?? null,
+        result.skillInjection?.skillName ?? null,
+        result.skillInjection?.skillHash ?? null,
+        result.skillInjection?.contentLength ?? null,
+        result.unscoredReason ?? null,
+        result.gatePassed ?? null,
       ],
     );
+    await this.insertCaseNodes(transaction, result);
     for (const score of result.scores) {
       await transaction.query(
         `insert into agent_recall.evaluation_scores (
@@ -502,6 +575,67 @@ export class EvaluationStore {
           score.estimatedCost ?? null,
         ],
       );
+    }
+  }
+
+  private async insertCaseNodes(
+    transaction: PostgresQueryable,
+    result: EvaluationCaseResult,
+  ): Promise<void> {
+    const nodes = result.nodes ?? [];
+    for (const [index, node] of nodes.entries()) {
+      await transaction.query(
+        `insert into agent_recall.evaluation_case_nodes (
+          case_result_id, node_id, node_type, node_version, role, status,
+          pending_reason, pending_upstream, started_at, finished_at, duration_ms,
+          attribution, produced_outputs, facts, sequence
+        ) values (
+          $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12::jsonb, $13::jsonb, $14::jsonb, $15
+        )`,
+        [
+          result.id,
+          node.nodeId,
+          node.nodeType,
+          node.nodeVersion,
+          node.role,
+          node.status,
+          node.pendingReason ?? null,
+          node.pendingUpstream ? JSON.stringify(node.pendingUpstream) : null,
+          node.startedAt === undefined ? null : new Date(node.startedAt),
+          node.finishedAt === undefined ? null : new Date(node.finishedAt),
+          node.durationMs ?? null,
+          node.attribution ? JSON.stringify(node.attribution) : null,
+          node.producedOutputs ? JSON.stringify(node.producedOutputs) : null,
+          node.facts ? JSON.stringify(node.facts) : null,
+          index,
+        ],
+      );
+      for (const [verdictIndex, verdict] of (node.verdicts ?? []).entries()) {
+        await transaction.query(
+          `insert into agent_recall.evaluation_case_verdicts (
+            case_result_id, verdict_id, node_id, node_type, evaluator_id, status,
+            raw, threshold, labels, reason, evidence, failed_criteria, duration_ms, sequence
+          ) values (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11::jsonb, $12::jsonb, $13, $14
+          )`,
+          [
+            result.id,
+            verdict.verdictId,
+            verdict.sourceNodeId,
+            verdict.sourceNodeType,
+            verdict.evaluatorId ?? null,
+            verdict.status,
+            verdict.raw ?? null,
+            verdict.threshold ?? null,
+            JSON.stringify(verdict.labels),
+            verdict.reason ?? null,
+            verdict.evidence ? JSON.stringify(verdict.evidence) : null,
+            verdict.failedCriteria ? JSON.stringify(verdict.failedCriteria) : null,
+            verdict.durationMs ?? null,
+            verdictIndex,
+          ],
+        );
+      }
     }
   }
 }
@@ -542,6 +676,13 @@ function mapRunSummary(row: Row): EvaluationRunSummary {
       ? { totalDurationMs: Number(row.total_duration_ms) }
       : {}),
     ...(row.error ? { error: String(row.error) } : {}),
+    ...(row.engine === "graph" ? { engine: "graph" as const } : {}),
+    ...(row.scored_case_count !== null && row.scored_case_count !== undefined
+      ? { scoredCaseCount: Number(row.scored_case_count) }
+      : {}),
+    ...(row.unscored_case_count !== null && row.unscored_case_count !== undefined
+      ? { unscoredCaseCount: Number(row.unscored_case_count) }
+      : {}),
     resultCount: Number(row.result_count ?? 0),
     failedResultCount: Number(row.failed_result_count ?? 0),
   };
@@ -561,6 +702,57 @@ function mapScore(row: Row): EvaluationScore {
       : {}),
     ...(row.estimated_cost !== null && row.estimated_cost !== undefined
       ? { estimatedCost: Number(row.estimated_cost) }
+      : {}),
+  };
+}
+
+function mapNodeRecord(row: Row, verdicts: EvaluationVerdict[]): EvaluationNodeRecord {
+  return {
+    nodeId: String(row.node_id),
+    nodeType: String(row.node_type),
+    nodeVersion: Number(row.node_version),
+    role: row.role as EvaluationNodeRecord["role"],
+    status: row.status as EvaluationNodeRecord["status"],
+    ...(row.pending_reason
+      ? { pendingReason: row.pending_reason as EvaluationNodeRecord["pendingReason"] }
+      : {}),
+    ...(row.pending_upstream ? { pendingUpstream: jsonArray(row.pending_upstream) } : {}),
+    ...(row.started_at ? { startedAt: timestamp(row.started_at) } : {}),
+    ...(row.finished_at ? { finishedAt: timestamp(row.finished_at) } : {}),
+    ...(row.duration_ms !== null && row.duration_ms !== undefined
+      ? { durationMs: Number(row.duration_ms) }
+      : {}),
+    ...(row.attribution
+      ? {
+          attribution: jsonRecord(row.attribution) as unknown as
+            EvaluationNodeRecord["attribution"],
+        }
+      : {}),
+    ...(row.produced_outputs ? { producedOutputs: jsonArray(row.produced_outputs) } : {}),
+    ...(row.facts ? { facts: jsonRecord(row.facts) } : {}),
+    ...(verdicts.length > 0 ? { verdicts } : {}),
+  };
+}
+
+function mapVerdict(row: Row): EvaluationVerdict {
+  return {
+    verdictId: String(row.verdict_id),
+    ...(row.evaluator_id ? { evaluatorId: String(row.evaluator_id) } : {}),
+    labels: Object.fromEntries(
+      Object.entries(jsonRecord(row.labels)).map(([key, value]) => [key, String(value)]),
+    ),
+    status: row.status as EvaluationVerdict["status"],
+    ...(row.raw !== null && row.raw !== undefined ? { raw: Number(row.raw) } : {}),
+    ...(row.threshold !== null && row.threshold !== undefined
+      ? { threshold: Number(row.threshold) }
+      : {}),
+    ...(row.reason ? { reason: String(row.reason) } : {}),
+    ...(row.evidence ? { evidence: jsonArray(row.evidence) } : {}),
+    ...(row.failed_criteria ? { failedCriteria: jsonArray(row.failed_criteria) } : {}),
+    sourceNodeId: String(row.node_id),
+    sourceNodeType: String(row.node_type),
+    ...(row.duration_ms !== null && row.duration_ms !== undefined
+      ? { durationMs: Number(row.duration_ms) }
       : {}),
   };
 }

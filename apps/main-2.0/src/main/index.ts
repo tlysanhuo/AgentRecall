@@ -199,6 +199,7 @@ import { bootstrapApplicationPaths } from "./app-path-bootstrap";
 import { startPostgresRuntime, type PostgresRuntime } from "./postgres/managed-postgres";
 import { WORKFLOW_PORTABLE_MAX_BYTES } from "../automation/engine/main/hub/workflow/workflow-portable-file";
 import { writeWorkflowExportFileAtomically } from "./services/workflow-portable-filesystem";
+import type { EvaluationEvidenceValue } from "../core/evaluation/nodes/contracts";
 import type {
   EnvironmentUpsertInput,
   MigrationAgent,
@@ -517,6 +518,40 @@ function bundledSkillsPath(): string {
   return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]!;
 }
 
+/**
+ * Trajectory evidence for an evaluation case, read from the session its agent
+ * execution produced.
+ *
+ * `skillUsageObservable` is what keeps the skill-use observation honest: the
+ * usage log only exists when the hook is installed, so without it an empty
+ * trigger list means "unknown" rather than "the skill went unused".
+ */
+async function readEvaluationTrace(sessionKey: string): Promise<EvaluationEvidenceValue | null> {
+  const session = await store.getSession(sessionKey);
+  if (!session) return null;
+  const [turns, traceEvents, usedSkillNames] = await Promise.all([
+    store.listSessionTurns(sessionKey),
+    store.getTraceEvents(sessionKey),
+    store.listSkillTriggersForSession(sessionKey),
+  ]);
+  const toolResults = traceEvents.filter((event) => event.kind === "tool_result");
+  const failedToolResults = toolResults.filter((event) => event.status === "failed");
+  return {
+    turnCount: turns.length,
+    toolCallCount: traceEvents.filter((event) => event.kind === "tool_call").length,
+    toolFailureCount: failedToolResults.length,
+    failedToolNames: [...new Set(failedToolResults.map((event) => event.title))].sort(),
+    totalTokens: turns.length > 0
+      ? turns.reduce((total, turn) => total + turn.inputTokens + turn.outputTokens, 0)
+      : null,
+    errorCount: traceEvents.filter(
+      (event) => event.kind === "event" && event.status === "failed",
+    ).length,
+    usedSkillNames,
+    skillUsageObservable: skillService.getUsageHookStatus(),
+  };
+}
+
 function createAutomationService(): NativeAutomationService {
   if (!postgresDatabase) throw new Error("PostgreSQL must be ready before automation starts.");
   return new NativeAutomationService({
@@ -595,6 +630,14 @@ function createAutomationService(): NativeAutomationService {
         };
       },
     },
+    readEvaluationSkill: (skillName) => skillService.readSkillInstructions(skillName),
+    resolveEvaluationSession: async (rawId) => {
+      const session = await store.findByRawId(rawId);
+      return session
+        ? { sessionKey: session.sessionKey, source: session.source, rawId: session.rawId }
+        : null;
+    },
+    readEvaluationTrace: (sessionKey) => readEvaluationTrace(sessionKey),
     confirmWorkflowScriptPermissions: async ({ nodeTitle, permissions }) => {
       const result = mainWindow ? await dialog.showMessageBox(mainWindow, {
         type: "warning",

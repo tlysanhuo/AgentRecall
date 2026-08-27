@@ -9,12 +9,25 @@ import type {
 } from "../../automation/contracts";
 import { runEvaluation } from "../../automation/engine/main/evaluation-runner";
 import type { EvaluationStore } from "../../automation/engine/main/evaluation-store";
+import type {
+  EvaluationEvidenceValue,
+  EvaluationSessionValue,
+} from "../../core/evaluation/nodes/contracts";
 
 export type EvaluationAgentExecution = (
-  configuredAgentId: string,
-  prompt: string,
+  input: {
+    configuredAgentId: string;
+    prompt: string;
+    /** Injected with the task; carries the selected skill's instructions. */
+    developerInstructions?: string;
+  },
   signal?: AbortSignal,
-) => Promise<{ output: string; durationMs: number }>;
+) => Promise<{
+  output: string;
+  durationMs: number;
+  /** Runtime-native ids used to link this run to its session. */
+  executionReference?: { sessionId?: string; turnId?: string };
+}>;
 
 // Rubric for auto-provisioned judges. The runner appends the JSON return
 // contract (score/reason/evidence/failedCriteria) on its own. Exported so the
@@ -43,6 +56,19 @@ export interface EvaluationServiceDependencies {
   store: EvaluationStore;
   agents: () => ConfiguredAgent[];
   executeAgent: EvaluationAgentExecution;
+  /**
+   * Reads the SKILL.md bytes and hash of an installed skill, so an experiment
+   * bound to a skill injects that skill's instructions with the task and can
+   * attribute its result to the exact text that ran.
+   */
+  readSkill?: (skillName: string) => Promise<{ content: string; hash: string } | null>;
+  /**
+   * Resolves the runtime session id an execution reported to the indexed
+   * AgentRecall session. Session linkage is skipped when this and `readTrace`
+   * are not both wired.
+   */
+  resolveSession?: (rawId: string) => Promise<EvaluationSessionValue | null>;
+  readTrace?: (sessionKey: string) => Promise<EvaluationEvidenceValue | null>;
 }
 
 interface ActiveEvaluationExecution {
@@ -230,12 +256,15 @@ export class EvaluationService {
     dataset: EvaluationDataset;
     evaluators: EvaluationEvaluator[];
     agentRevisionId?: string;
+    readSkill?: EvaluationServiceDependencies["readSkill"];
+    resolveSession?: EvaluationServiceDependencies["resolveSession"];
+    readTrace?: EvaluationServiceDependencies["readTrace"];
     execute: EvaluationAgentExecution;
     executeJudge: (
       runtimeId: string,
       prompt: string,
       signal?: AbortSignal,
-    ) => ReturnType<EvaluationAgentExecution>;
+    ) => Promise<{ output: string; durationMs: number }>;
   }> {
     const experiment = (await this.dependencies.store.listExperiments()).find(
       (item) => item.id === experimentId,
@@ -284,6 +313,11 @@ export class EvaluationService {
       ...(targetAgent.currentRevisionId
         ? { agentRevisionId: targetAgent.currentRevisionId }
         : {}),
+      ...(this.dependencies.readSkill ? { readSkill: this.dependencies.readSkill } : {}),
+      ...(this.dependencies.resolveSession
+        ? { resolveSession: this.dependencies.resolveSession }
+        : {}),
+      ...(this.dependencies.readTrace ? { readTrace: this.dependencies.readTrace } : {}),
       execute: this.dependencies.executeAgent,
       executeJudge: (runtimeId, prompt, signal) => {
         const judge = judgesByRuntime.get(runtimeId);
@@ -292,7 +326,7 @@ export class EvaluationService {
             `Runtime channel ${runtimeId} does not have an execution Agent for LLM Judge.`,
           );
         }
-        return this.dependencies.executeAgent(judge.id, prompt, signal);
+        return this.dependencies.executeAgent({ configuredAgentId: judge.id, prompt }, signal);
       },
     };
   }

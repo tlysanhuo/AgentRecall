@@ -5,7 +5,7 @@ import { AlertTriangle, Beaker, CheckCircle2, ChevronDown, ChevronRight, EyeOff,
 import type { SkillTriggerLink } from "../../../../core/session-store";
 import type { SkillFinding } from "../../../../core/skill-eval-findings";
 import type { SkillEvalDetail, SkillEvalOverview, SkillEvalSuite } from "../../../../main/services/skill-service";
-import type { EvaluationEvaluator, EvaluationRun, EvaluationRunSummary, ConfiguredAgent } from "../../../../automation/contracts";
+import type { EvaluationEvaluator, EvaluationNodeRecord, EvaluationRun, EvaluationRunSummary, ConfiguredAgent } from "../../../../automation/contracts";
 import { formatRelativeTime } from "../../../../core/format-session";
 import { localize, type LanguageMode } from "../../language";
 import { EvaluationFeaturePage } from "../automation/evaluation-feature-page";
@@ -223,7 +223,7 @@ export function EvalPage({
                   ) : (
                     <>
                       <FindingsCard language={language} findings={findings} />
-                      <EvalSuitesCard language={language} skill={selected.skill} />
+                      <EvalSuitesCard language={language} skill={selected.skill} onOpenSession={onOpenSession} />
                       <SignalsCard language={language} detail={detail} />
                       <VersionsCard language={language} detail={detail} />
                       <TriggersCard
@@ -408,9 +408,11 @@ function formatDuration(value: number | null): string {
 function EvalSuitesCard({
   language,
   skill,
+  onOpenSession,
 }: {
   language: LanguageMode;
   skill: string;
+  onOpenSession: (sessionKey: string) => void;
 }): ReactElement {
   const l = (en: string, zh: string) => localize(language, en, zh);
   const [suites, setSuites] = useState<SkillEvalSuite[] | null>(null);
@@ -603,7 +605,7 @@ function EvalSuitesCard({
                   <Trash2 size={12} />{deletingId === suite.id ? l("Deleting...", "删除中...") : l("Delete", "删除")}
                 </button>
               </div>
-              <SuiteRunsSection language={language} suite={suite} />
+              <SuiteRunsSection language={language} suite={suite} onOpenSession={onOpenSession} />
             </li>
           ))}
         </ul>
@@ -941,9 +943,11 @@ function FindingsCard({
 function SuiteRunsSection({
   language,
   suite,
+  onOpenSession,
 }: {
   language: LanguageMode;
   suite: SkillEvalSuite;
+  onOpenSession: (sessionKey: string) => void;
 }): ReactElement {
   const l = (en: string, zh: string) => localize(language, en, zh);
   const [open, setOpen] = useState(false);
@@ -1066,7 +1070,7 @@ function SuiteRunsSection({
                     <span className="eval-badge eval-badge-warn">{l(`${run.failedResultCount} failed`, `${run.failedResultCount} 条失败`)}</span>
                   ) : null}
                 </button>
-                {expandedRunId === run.id ? <RunCaseDetail language={language} runId={run.id} /> : null}
+                {expandedRunId === run.id ? <RunCaseDetail language={language} runId={run.id} onOpenSession={onOpenSession} /> : null}
               </li>
             ))}
           </ul>
@@ -1086,12 +1090,127 @@ function runStatusText(language: LanguageMode, status: string): string {
   return l("Pending", "等待中");
 }
 
+const NODE_LABELS: Record<string, [string, string]> = {
+  task_source: ["Task", "任务"],
+  skill_provision: ["Skill", "Skill 注入"],
+  agent_execute: ["Agent run", "Agent 执行"],
+  session_link: ["Session link", "会话关联"],
+  evidence_extract: ["Trace", "轨迹提取"],
+  skill_use_observe: ["Skill use", "Skill 使用"],
+  deterministic_judge: ["Check", "确定性判定"],
+  llm_judge: ["LLM judge", "模型评判"],
+};
+
+function nodeLabel(language: LanguageMode, node: EvaluationNodeRecord): string {
+  const label = NODE_LABELS[node.nodeType];
+  return label ? localize(language, label[0], label[1]) : node.nodeType;
+}
+
+/**
+ * Human wording for why a node produced nothing.
+ *
+ * The distinction the copy has to preserve: an excused step means the
+ * evaluation could not judge, not that the agent did badly.
+ */
+function nodeReasonText(language: LanguageMode, reason: string): string {
+  const l = (en: string, zh: string) => localize(language, en, zh);
+  const known: Record<string, [string, string]> = {
+    case_cancelled: ["the run was cancelled", "运行已取消"],
+    judge_runtime_not_configured: ["the judge has no Runtime channel", "评判器未配置 Runtime 通道"],
+    judge_executor_unavailable: ["no execution Agent for the judge", "评判器没有可用的执行 Agent"],
+    judge_output_unparseable: ["the judge did not return usable JSON", "评判器没有返回可解析的 JSON"],
+    judge_score_missing: ["the judge returned no score", "评判器没有给出分数"],
+    expected_output_missing: ["the case has no expected output", "该用例没有期望输出"],
+    skill_not_readable: ["the selected skill could not be read", "读不到所选的 Skill"],
+    skill_reader_unavailable: ["skill injection is unavailable", "Skill 注入不可用"],
+    runtime_reported_no_session: ["the runtime reported no session", "Runtime 没有返回会话标识"],
+    session_not_indexed: ["the session was not indexed in time", "会话尚未完成索引"],
+    session_lookup_unavailable: ["session lookup is unavailable", "会话查询不可用"],
+    trace_not_available: ["the session trace is unavailable", "读不到会话轨迹"],
+    trace_reader_unavailable: ["trace reading is unavailable", "轨迹读取不可用"],
+    cancelled_before_session_link: ["cancelled before linking the session", "关联会话前已取消"],
+    upstream_not_pass: ["an earlier step did not pass", "上游步骤未通过"],
+    upstream_skipped: ["an earlier step was skipped", "上游步骤被跳过"],
+    not_decided: ["the run ended first", "运行提前结束"],
+  };
+  const match = known[reason];
+  return match ? l(match[0], match[1]) : reason;
+}
+
+/**
+ * Read-only view of one case's evaluation graph.
+ *
+ * Shows every node, including the ones that never ran, so a reader can tell
+ * "the judge rejected the answer" from "the judge never got a chance".
+ */
+function CaseNodeGraph({
+  language,
+  nodes,
+}: {
+  language: LanguageMode;
+  nodes: readonly EvaluationNodeRecord[];
+}): ReactElement {
+  const l = (en: string, zh: string) => localize(language, en, zh);
+  const statusClass = (status: EvaluationNodeRecord["status"]): string => {
+    if (status === "pass") return "eval-badge-current";
+    if (status === "fail") return "eval-badge-warn";
+    if (status === "excused" || status === "error") return "eval-badge-dim";
+    return "eval-badge-dim";
+  };
+  const statusText = (status: EvaluationNodeRecord["status"]): string => {
+    if (status === "pass") return l("done", "完成");
+    if (status === "fail") return l("failed", "失败");
+    if (status === "excused") return l("excused", "无法判定");
+    if (status === "error") return l("error", "出错");
+    if (status === "disabled") return l("off", "已停用");
+    return l("skipped", "未执行");
+  };
+  return (
+    <details className="eval-run-text eval-case-graph">
+      <summary>
+        {l("Graph", "执行图")}
+        {" · "}
+        {nodes.filter((node) => node.status === "pass").length}/{nodes.length}
+      </summary>
+      <ol className="eval-case-graph-nodes">
+        {nodes.map((node) => {
+          const reason = node.attribution?.reason ?? node.pendingReason;
+          const skillUse = node.nodeType === "skill_use_observe" ? node.facts : undefined;
+          return (
+            <li key={node.nodeId}>
+              <span className="eval-case-graph-name">{nodeLabel(language, node)}</span>
+              <span className={`eval-badge ${statusClass(node.status)}`}>{statusText(node.status)}</span>
+              {node.durationMs !== undefined ? (
+                <span className="eval-muted">{formatDuration(node.durationMs)}</span>
+              ) : null}
+              {reason ? (
+                <span className="eval-muted">{nodeReasonText(language, reason)}</span>
+              ) : null}
+              {skillUse && skillUse.injected === true ? (
+                <span className="eval-muted">
+                  {skillUse.used === true
+                    ? l("skill was used", "使用了该 Skill")
+                    : skillUse.used === false
+                      ? l("skill went unused", "未使用该 Skill")
+                      : l("skill use is not observable", "无法观测是否使用")}
+                </span>
+              ) : null}
+            </li>
+          );
+        })}
+      </ol>
+    </details>
+  );
+}
+
 function RunCaseDetail({
   language,
   runId,
+  onOpenSession,
 }: {
   language: LanguageMode;
   runId: string;
+  onOpenSession: (sessionKey: string) => void;
 }): ReactElement {
   const l = (en: string, zh: string) => localize(language, en, zh);
   const [run, setRun] = useState<EvaluationRun | null>(null);
@@ -1127,17 +1246,49 @@ function RunCaseDetail({
       {run.results.length === 0 ? (
         <p className="eval-muted">{l("No case results were recorded.", "没有记录到用例结果。")}</p>
       ) : run.results.map((result, index) => {
-        const passed = !result.error && result.scores.length > 0 && result.scores.every((score) => score.passed);
+        // Three outcomes, not two: a case that decided nothing is unscored, and
+        // showing it as "failed" would blame the agent for a judge that could
+        // not run.
+        const unscored = result.unscoredReason !== undefined;
+        const passed = !unscored
+          && result.gatePassed !== false
+          && result.scores.length > 0
+          && result.scores.every((score) => score.passed);
         return (
           <div key={result.id} className="eval-run-case">
             <header className="eval-run-case-header">
               <span className="eval-run-case-title">{l(`Case ${index + 1}`, `用例 ${index + 1}`)}{run.results.filter((item) => item.datasetItemId === result.datasetItemId).length > 1 ? ` · #${result.repetition}` : ""}</span>
-              <span className={`eval-badge ${passed ? "eval-badge-current" : "eval-badge-warn"}`}>
-                {passed ? l("Passed", "通过") : l("Failed", "未通过")}
+              <span className={`eval-badge ${unscored ? "eval-badge-dim" : passed ? "eval-badge-current" : "eval-badge-warn"}`}>
+                {unscored ? l("Not scored", "未评分") : passed ? l("Passed", "通过") : l("Failed", "未通过")}
               </span>
               <span className="eval-muted">{formatDuration(result.durationMs)}</span>
+              {result.skillInjection ? (
+                <span className="eval-badge eval-badge-dim" title={result.skillInjection.skillHash}>
+                  {l("skill", "Skill")} {result.skillInjection.skillName}@{result.skillInjection.skillHash.slice(0, 8)}
+                </span>
+              ) : null}
+              {result.sessionKey ? (
+                <button
+                  type="button"
+                  className="eval-trigger-session"
+                  onClick={() => onOpenSession(result.sessionKey!)}
+                >
+                  {l("Open session", "打开会话")}
+                </button>
+              ) : null}
             </header>
-            {result.error ? <p className="eval-error">{result.error}</p> : null}
+            {unscored ? (
+              <p className="eval-muted">
+                {l("Nothing was decided for this case", "本用例没有得出任何评分结论")}
+                {" · "}{nodeReasonText(language, result.unscoredReason!)}
+              </p>
+            ) : null}
+            {result.nodes && result.nodes.length > 0 ? (
+              <CaseNodeGraph language={language} nodes={result.nodes} />
+            ) : result.error ? (
+              // Runs recorded before the graph engine carry only this message.
+              <p className="eval-error">{result.error}</p>
+            ) : null}
             <details className="eval-run-text">
               <summary>{l("Input", "输入")}</summary>
               <pre>{result.input}</pre>

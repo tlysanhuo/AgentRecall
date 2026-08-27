@@ -1,3 +1,15 @@
+import type { EvaluationNodeRecord } from "../../../../core/evaluation/graph/node";
+
+export type { EvaluationNodeRecord } from "../../../../core/evaluation/graph/node";
+export type {
+  EvaluationFailureAttribution,
+  EvaluationFailureType,
+  EvaluationPendingReason,
+  EvaluationRecordStatus,
+  EvaluationVerdict,
+  EvaluationVerdictStatus,
+} from "../../../../core/evaluation/graph/node";
+
 export interface EvaluationDatasetItem {
   id: string;
   input: string;
@@ -69,6 +81,28 @@ export interface EvaluationCaseResult {
   error?: string;
   durationMs: number;
   scores: EvaluationScore[];
+  /**
+   * Per-node execution records from the evaluation graph. Absent on runs
+   * recorded before the graph engine existed; those runs keep only the case and
+   * score rows they were written with.
+   */
+  nodes?: EvaluationNodeRecord[];
+  /** Session this case's agent execution produced, once indexing linked it. */
+  sessionKey?: string;
+  /** The skill whose instructions were injected with the task, if any. */
+  skillInjection?: {
+    skillName: string;
+    skillHash: string;
+    contentLength: number;
+  };
+  /**
+   * Why this case has no score. Set when nothing was decided — a missing judge
+   * runtime, an agent that never answered, a cancelled run — so the absence is
+   * never mistaken for a zero.
+   */
+  unscoredReason?: string;
+  /** False when a hard defect closed the case's gate. */
+  gatePassed?: boolean;
 }
 
 export interface EvaluationRun {
@@ -87,6 +121,15 @@ export interface EvaluationRun {
   totalDurationMs?: number;
   error?: string;
   results: EvaluationCaseResult[];
+  /**
+   * Marks a run executed by the evaluation graph. Absent means the run predates
+   * it, so its scores follow the older rules and carry no node records.
+   */
+  engine?: "graph";
+  /** Cases that produced a score. The score fields average over these only. */
+  scoredCaseCount?: number;
+  /** Cases that decided nothing; excluded from every score above. */
+  unscoredCaseCount?: number;
 }
 
 export type EvaluationRunSummary = Omit<EvaluationRun, "results"> & {

@@ -34,12 +34,22 @@ export class ConfiguredAgentExecutionService {
   }) {}
 
   async runOneShot(
-    input: { configuredAgentId: string; prompt: string; workDir?: string },
+    input: { configuredAgentId: string; prompt: string; workDir?: string; developerInstructions?: string },
     onEvent?: (event: WorkflowAgentEvent) => void,
     signal?: AbortSignal,
-  ): Promise<{ output: string; durationMs: number }> {
+  ): Promise<{
+    output: string;
+    durationMs: number;
+    executionReference?: WorkflowAgentResponse["executionReference"];
+  }> {
     const result = await this.executeConfiguredAgent(input, false, onEvent, signal);
-    return { output: result.output, durationMs: result.durationMs };
+    return {
+      output: result.output,
+      durationMs: result.durationMs,
+      // The reference is what links a one-shot run to the session it created.
+      // Dropping it here left evaluation runs with no way back to their session.
+      ...(result.executionReference ? { executionReference: result.executionReference } : {}),
+    };
   }
 
   async runConversation(

@@ -1672,4 +1672,71 @@ export const POSTGRES_MIGRATIONS: readonly PostgresMigration[] = [{
       WHERE source IN ('codex-cli', 'codex-app', 'stepcode-codex', 'tcodex-cli');
     `,
   ],
+}, {
+  version: 42,
+  name: "record evaluation graph nodes, verdicts and session links",
+  statements: [
+    `
+      ALTER TABLE agent_recall.evaluation_runs
+        ADD COLUMN IF NOT EXISTS engine text,
+        ADD COLUMN IF NOT EXISTS scored_case_count integer,
+        ADD COLUMN IF NOT EXISTS unscored_case_count integer;
+
+      ALTER TABLE agent_recall.evaluation_case_results
+        ADD COLUMN IF NOT EXISTS session_key text,
+        ADD COLUMN IF NOT EXISTS skill_name text,
+        ADD COLUMN IF NOT EXISTS skill_hash text,
+        ADD COLUMN IF NOT EXISTS skill_content_length integer,
+        ADD COLUMN IF NOT EXISTS unscored_reason text,
+        ADD COLUMN IF NOT EXISTS gate_passed boolean;
+
+      CREATE TABLE IF NOT EXISTS agent_recall.evaluation_case_nodes (
+        case_result_id text NOT NULL
+          REFERENCES agent_recall.evaluation_case_results(id) ON DELETE CASCADE,
+        node_id text NOT NULL,
+        node_type text NOT NULL,
+        node_version integer NOT NULL,
+        role text NOT NULL CHECK (role IN ('prepare', 'judge')),
+        status text NOT NULL
+          CHECK (status IN ('pass', 'fail', 'excused', 'error', 'pending', 'disabled')),
+        pending_reason text,
+        pending_upstream jsonb,
+        started_at timestamptz,
+        finished_at timestamptz,
+        duration_ms bigint,
+        attribution jsonb,
+        produced_outputs jsonb,
+        facts jsonb,
+        sequence integer NOT NULL,
+        PRIMARY KEY (case_result_id, node_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_recall.evaluation_case_verdicts (
+        case_result_id text NOT NULL
+          REFERENCES agent_recall.evaluation_case_results(id) ON DELETE CASCADE,
+        verdict_id text NOT NULL,
+        node_id text NOT NULL,
+        node_type text NOT NULL,
+        evaluator_id text,
+        status text NOT NULL CHECK (status IN ('met', 'unmet', 'uncertain')),
+        raw double precision,
+        threshold double precision,
+        labels jsonb NOT NULL DEFAULT '{}'::jsonb,
+        reason text,
+        evidence jsonb,
+        failed_criteria jsonb,
+        duration_ms bigint,
+        sequence integer NOT NULL,
+        PRIMARY KEY (case_result_id, verdict_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS evaluation_case_nodes_order_idx
+        ON agent_recall.evaluation_case_nodes (case_result_id, sequence);
+      CREATE INDEX IF NOT EXISTS evaluation_case_verdicts_node_idx
+        ON agent_recall.evaluation_case_verdicts (case_result_id, node_id);
+      CREATE INDEX IF NOT EXISTS evaluation_case_results_session_idx
+        ON agent_recall.evaluation_case_results (session_key)
+        WHERE session_key IS NOT NULL;
+    `,
+  ],
 }];

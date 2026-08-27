@@ -50,7 +50,7 @@ import {
   type WorkflowWorkbenchSnapshot,
 } from "../../shared/ipc/automation";
 import { resolveAutomationPaths, type AutomationPaths } from "./automation-paths";
-import { EvaluationService } from "./evaluation-service";
+import { EvaluationService, type EvaluationServiceDependencies } from "./evaluation-service";
 import type { PostgresDatabase } from "../../core/postgres/database";
 import { TeamChatService } from "../team-chat/team-chat-service";
 import { PostgresTeamChatStore } from "../team-chat/postgres-team-chat-store";
@@ -95,6 +95,15 @@ export interface AutomationServiceOptions {
     nodeTitle: string;
     permissions: WorkflowScriptPermission[];
   }) => Promise<boolean>;
+  /**
+   * Evaluation graph hooks owned by the host: reading an installed skill's
+   * instructions, and linking a finished run to the session it produced. Left
+   * unset, an experiment still runs — it just injects no skill and records no
+   * session link.
+   */
+  readEvaluationSkill?: EvaluationServiceDependencies["readSkill"];
+  resolveEvaluationSession?: EvaluationServiceDependencies["resolveSession"];
+  readEvaluationTrace?: EvaluationServiceDependencies["readTrace"];
 }
 
 interface AutomationServiceDependencies {
@@ -342,8 +351,23 @@ export class NativeAutomationService {
     this.evaluations = dependencies.evaluations ?? new EvaluationService({
       store: new EvaluationStore(options.database),
       agents: () => this.hubInstance.snapshot().configuredAgents,
-      executeAgent: (configuredAgentId, prompt, signal) =>
-        this.configuredAgentExecutor.runOneShot({ configuredAgentId, prompt }, undefined, signal),
+      executeAgent: (input, signal) =>
+        this.configuredAgentExecutor.runOneShot(
+          {
+            configuredAgentId: input.configuredAgentId,
+            prompt: input.prompt,
+            ...(input.developerInstructions
+              ? { developerInstructions: input.developerInstructions }
+              : {}),
+          },
+          undefined,
+          signal,
+        ),
+      ...(options.readEvaluationSkill ? { readSkill: options.readEvaluationSkill } : {}),
+      ...(options.resolveEvaluationSession
+        ? { resolveSession: options.resolveEvaluationSession }
+        : {}),
+      ...(options.readEvaluationTrace ? { readTrace: options.readEvaluationTrace } : {}),
     });
     this.teamChat = dependencies.teamChats ?? new TeamChatService({
       storeFactory: () => new PostgresTeamChatStore(options.database),
