@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createJudgeScriptRunner } from "./judge-script-runner";
 import { executeEvaluationRun, type EvaluationRunPlan } from "./run";
 import type {
   EvaluationNodeDependencies,
@@ -395,5 +396,114 @@ describe("evaluation run", () => {
     expect(result!.score.score).toBe(1);
     expect(result!.score.decided).toBe(1);
     expect(result!.aggregate.completeness.notDecided).toBe(1);
+  });
+});
+
+describe("script judges end to end", () => {
+  it("scores a run with a judge the user wrote, on the dimension it names", async () => {
+    const outcome = await executeEvaluationRun(
+      plan({
+        cases: [task("case-1", { expectedOutput: "4" })],
+        evaluators: [{
+          id: "shape",
+          kind: "script",
+          threshold: 0.5,
+          dimension: "格式",
+          scriptMode: "inline_js",
+          script: `
+            const answer = artifact.output.trim();
+            return [
+              { score: answer === task.expectedOutput ? 1 : 0, dimension: "正确性" },
+              { score: answer.length <= 4 ? 1 : 0, dimension: "简洁性" },
+            ];
+          `,
+        }],
+      }),
+      dependencies({ runJudgeScript: createJudgeScriptRunner() }),
+    );
+
+    // One script, two dimensions — which is why a script may return a list.
+    expect(outcome.cases[0]!.score.dimensions.map((item) => [item.dimension, item.score]))
+      .toEqual([["正确性", 1], ["简洁性", 1]]);
+    expect(outcome.score.passRate).toBe(1);
+  });
+
+  it("excuses a broken script instead of failing the agent for it", async () => {
+    const outcome = await executeEvaluationRun(
+      plan({
+        evaluators: [{
+          id: "broken",
+          kind: "script",
+          threshold: 0.5,
+          scriptMode: "inline_js",
+          script: "throw new Error('the rubric has a typo');",
+        }],
+      }),
+      dependencies({ runJudgeScript: createJudgeScriptRunner() }),
+    );
+
+    const record = outcome.cases[0]!.aggregate.nodes
+      .find((item) => item.nodeType === "script_judge")!;
+    expect(record.status).toBe("excused");
+    expect(record.attribution).toMatchObject({ type: "judge_failure" });
+    // Nothing was learned about the agent, so there is no score — not a zero.
+    expect(outcome.cases[0]!.score.score).toBeNull();
+    expect(outcome.score.unscoredCaseCount).toBe(1);
+  });
+
+  it("judges the trajectory when the script asks for it", async () => {
+    const outcome = await executeEvaluationRun(
+      plan({
+        linkTrajectory: true,
+        evaluators: [{
+          id: "efficiency",
+          kind: "script",
+          threshold: 0.5,
+          subject: "trajectory",
+          scriptMode: "inline_js",
+          script: "return { score: trajectory.toolCallCount <= 2 ? 1 : 0, dimension: '效率' };",
+        }],
+      }),
+      dependencies({
+        runAgent: async () => ({
+          output: "4",
+          durationMs: 10,
+          executionReference: { sessionId: "raw-1" },
+        }),
+        resolveSession: async () => ({ sessionKey: "claude:raw-1" }),
+        readTrajectory: async () => trajectory({ toolCallCount: 1 }),
+        runJudgeScript: createJudgeScriptRunner(),
+      }),
+    );
+
+    expect(outcome.cases[0]!.score.dimensions.map((item) => [item.dimension, item.score]))
+      .toEqual([["效率", 1]]);
+  });
+
+  it("leaves a trajectory script out of a folder run and says so", async () => {
+    // A folder has no trajectory; the judge must be reported as skipped rather
+    // than quietly counting as a pass.
+    const outcome = await executeEvaluationRun(
+      plan({
+        source: "folder",
+        cases: [task("case-1", { artifactRef: { path: "/tmp/artifact" } })],
+        evaluators: [{
+          id: "efficiency",
+          kind: "script",
+          threshold: 0.5,
+          subject: "trajectory",
+          scriptMode: "inline_js",
+          script: "return 1;",
+        }],
+      }),
+      dependencies({
+        readFolderArtifact: async () => ({ output: "4" }),
+        runJudgeScript: createJudgeScriptRunner(),
+      }),
+    );
+
+    expect(outcome.cases[0]!.skippedEvaluatorIds).toEqual(["efficiency"]);
+    expect(outcome.cases[0]!.aggregate.nodes
+      .some((item) => item.nodeType === "script_trajectory_judge")).toBe(false);
   });
 });

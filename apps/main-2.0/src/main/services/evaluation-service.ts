@@ -94,7 +94,7 @@ export interface EvaluationServiceDependencies {
    * Opens a native directory picker, returning null when the user cancels. The
    * renderer never names a path of its own; the dialog is the only way in.
    */
-  chooseDatasetDirectory?: (mode: "import" | "export") => Promise<string | null>;
+  chooseDatasetDirectory?: (mode: "read" | "write") => Promise<string | null>;
 }
 
 interface ActiveEvaluationExecution {
@@ -135,7 +135,7 @@ export class EvaluationService {
     { dataset: EvaluationDataset; directory: string; errors: string[] } | null
   > {
     this.assertOpen();
-    const directory = await this.dependencies.chooseDatasetDirectory?.("import");
+    const directory = await this.dependencies.chooseDatasetDirectory?.("read");
     if (!directory) return null;
     const folder = readDatasetFolder(directory);
     if (folder.cases.length === 0) {
@@ -163,7 +163,7 @@ export class EvaluationService {
     const dataset = (await this.dependencies.store.listDatasets())
       .find((item) => item.id === datasetId);
     if (!dataset) throw new Error(`Evaluation dataset not found: ${datasetId}`);
-    const directory = await this.dependencies.chooseDatasetDirectory?.("export");
+    const directory = await this.dependencies.chooseDatasetDirectory?.("write");
     if (!directory) return null;
     const written = writeDatasetFolder(directory, {
       name: dataset.name,

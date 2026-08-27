@@ -1116,12 +1116,16 @@ async function chooseProviderConfigDirectory(
 }
 
 async function chooseEvaluationDatasetDirectory(
-  mode: "import" | "export",
+  mode: "read" | "write",
 ): Promise<string | null> {
-  const options: Electron.OpenDialogOptions = mode === "import"
-    ? { title: "Choose a dataset folder to import", properties: ["openDirectory"] }
+  // The titles deliberately avoid the word "import" before a quote: the CommonJS
+  // shim electron-vite appends is placed after the last thing its regex reads as
+  // a static import, and `to import", properties: ["` matches that shape closely
+  // enough to get the shim spliced into the middle of this function.
+  const options: Electron.OpenDialogOptions = mode === "read"
+    ? { title: "Choose the dataset folder to read", properties: ["openDirectory"] }
     : {
-        title: "Choose a folder to export the dataset into",
+        title: "Choose where to write the dataset folder",
         properties: ["openDirectory", "createDirectory"],
       };
   const result = mainWindow
