@@ -2327,3 +2327,9 @@
 @media (max-width: 760px) {
   .mcp-gateway-overview { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Per-case evaluation graph inside the experiment run detail. */
+.result-graph { display: grid; gap: 3px; margin: 4px 0 8px; padding: 0; list-style: none; counter-reset: result-graph-node; }
+.result-graph li { display: grid; grid-template-columns: 16px minmax(120px, 1fr) auto; gap: 6px; align-items: baseline; counter-increment: result-graph-node; font-size: 9px; }
+.result-graph li::before { content: counter(result-graph-node); color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+.result-graph li small { grid-column: 2 / -1; color: var(--muted); }

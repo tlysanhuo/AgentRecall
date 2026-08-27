@@ -298,8 +298,14 @@ export function ExperimentWorkspace({
                       <tbody>
                         {latest.results.map((result) => {
                           const score = averageCaseScore(result.scores);
+                          // A case that decided nothing is unscored, not failed:
+                          // reporting a judge that could not run as the agent's
+                          // failure is what the graph engine exists to stop.
+                          const unscored = result.unscoredReason !== undefined;
                           const passed =
-                            !result.error &&
+                            !unscored &&
+                            result.gatePassed !== false &&
+                            result.scores.length > 0 &&
                             result.scores.every((item) => item.passed);
                           return (
                             <tr key={result.id}>
@@ -314,6 +320,47 @@ export function ExperimentWorkspace({
                                       : "View output and scores"}
                                   </summary>
                                   <div className="result-detail">
+                                    {unscored ? (
+                                      <p>
+                                        <strong>
+                                          {zh ? "未评分" : "Not scored"}
+                                        </strong>
+                                        <small>{result.unscoredReason}</small>
+                                      </p>
+                                    ) : null}
+                                    {result.sessionKey ? (
+                                      <p>
+                                        <strong>{zh ? "会话" : "Session"}</strong>
+                                        <small>{result.sessionKey}</small>
+                                      </p>
+                                    ) : null}
+                                    {result.skillInjection ? (
+                                      <p>
+                                        <strong>Skill</strong>
+                                        <small>
+                                          {result.skillInjection.skillName}@
+                                          {result.skillInjection.skillHash.slice(0, 8)}
+                                        </small>
+                                      </p>
+                                    ) : null}
+                                    {result.nodes?.length ? (
+                                      <>
+                                        <span>{zh ? "执行图" : "Graph"}</span>
+                                        <ol className="result-graph">
+                                          {result.nodes.map((node) => (
+                                            <li key={node.nodeId}>
+                                              <strong>{node.nodeType}</strong>
+                                              <span>{node.status}</span>
+                                              <small>
+                                                {node.attribution?.reason ??
+                                                  node.pendingReason ??
+                                                  ""}
+                                              </small>
+                                            </li>
+                                          ))}
+                                        </ol>
+                                      </>
+                                    ) : null}
                                     <span>Output</span>
                                     <pre>
                                       {result.output || result.error || "-"}
@@ -345,9 +392,21 @@ export function ExperimentWorkspace({
                               </td>
                               <td>
                                 <InlineStatus
-                                  tone={passed ? "success" : "danger"}
+                                  tone={
+                                    unscored
+                                      ? "muted"
+                                      : passed
+                                        ? "success"
+                                        : "danger"
+                                  }
                                 >
-                                  {passed ? "PASS" : "FAIL"}
+                                  {unscored
+                                    ? zh
+                                      ? "未评分"
+                                      : "N/A"
+                                    : passed
+                                      ? "PASS"
+                                      : "FAIL"}
                                 </InlineStatus>
                               </td>
                               <td />
