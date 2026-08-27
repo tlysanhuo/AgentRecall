@@ -59,6 +59,11 @@ export interface EvaluationCasePlan {
   /** Add the session-link, evidence and skill-use observation nodes. */
   linkSessions: boolean;
   sessionLink?: { attempts?: number; delayMs?: number };
+  /**
+   * A graph authored in the editor. When present it replaces the derived shape,
+   * and only the per-case and evaluator parts of its config are rewritten.
+   */
+  savedSpec?: EvaluationGraphSpec;
 }
 
 export function createEvaluationNodeDefinitions(
@@ -155,12 +160,80 @@ export function buildEvaluationCaseSpec(plan: EvaluationCasePlan): EvaluationGra
   return { name: `evaluation-case:${plan.task.caseId}`, version: 1, nodes };
 }
 
+/**
+ * Rewrites a saved graph for one case.
+ *
+ * Three things a stored graph must not freeze: the case (the task node's config
+ * *is* the case), the target agent, and an evaluator's settings. Hydrating them
+ * at run time means editing a threshold or a judge prompt takes effect on the
+ * next run instead of silently keeping whatever the graph was saved with.
+ */
+export function hydrateEvaluationCaseSpec(
+  saved: EvaluationGraphSpec,
+  context: {
+    task: EvaluationTaskValue;
+    agentId: string;
+    skillName: string | null;
+    evaluators: readonly EvaluationPlanEvaluator[];
+  },
+): EvaluationGraphSpec {
+  const evaluatorsById = new Map(context.evaluators.map((item) => [item.id, item]));
+  return {
+    ...saved,
+    nodes: saved.nodes.map((node) => {
+      const config = (node.config ?? {}) as Record<string, unknown>;
+      if (node.type === TASK_SOURCE_NODE_TYPE) {
+        return { ...node, config: context.task };
+      }
+      if (node.type === AGENT_EXECUTE_NODE_TYPE) {
+        const agentId = typeof config.agentId === "string" && config.agentId.trim()
+          ? config.agentId
+          : context.agentId;
+        return { ...node, config: { ...config, agentId } };
+      }
+      if (node.type === SKILL_PROVISION_NODE_TYPE) {
+        const skillName = typeof config.skillName === "string" && config.skillName.trim()
+          ? config.skillName
+          : context.skillName;
+        return { ...node, config: { ...config, skillName } };
+      }
+      if (node.type === DETERMINISTIC_JUDGE_NODE_TYPE || node.type === LLM_JUDGE_NODE_TYPE) {
+        const evaluatorId = typeof config.evaluatorId === "string" ? config.evaluatorId : "";
+        const evaluator = evaluatorsById.get(evaluatorId);
+        // A judge whose evaluator was deleted keeps its saved id and is disabled,
+        // so the run reports a skipped step instead of failing to build.
+        if (!evaluator) return { ...node, enabled: false, config: { ...config, evaluatorId } };
+        return {
+          ...node,
+          config: node.type === LLM_JUDGE_NODE_TYPE
+            ? {
+                evaluatorId,
+                threshold: evaluator.threshold,
+                runtimeId: evaluator.runtimeId ?? "",
+                prompt: evaluator.prompt ?? "",
+              }
+            : { evaluatorId, kind: evaluator.kind, threshold: evaluator.threshold },
+        };
+      }
+      return node;
+    }),
+  };
+}
+
 export function buildEvaluationCaseGraph(
   plan: EvaluationCasePlan,
   dependencies: EvaluationNodeDependencies,
 ): BuiltEvaluationGraph {
+  const spec = plan.savedSpec
+    ? hydrateEvaluationCaseSpec(plan.savedSpec, {
+        task: plan.task,
+        agentId: plan.agentId,
+        skillName: plan.skillName,
+        evaluators: plan.evaluators,
+      })
+    : buildEvaluationCaseSpec(plan);
   return buildEvaluationGraph(
-    buildEvaluationCaseSpec(plan),
+    spec,
     createEvaluationNodeRegistry(createEvaluationNodeDefinitions(dependencies)),
   );
 }

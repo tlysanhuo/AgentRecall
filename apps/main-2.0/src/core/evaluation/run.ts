@@ -18,6 +18,7 @@ import {
   type EvaluationCasePlan,
   type EvaluationPlanEvaluator,
 } from "./case-graph";
+import type { EvaluationGraphSpec } from "./graph/builder";
 import type {
   EvaluationExecutionValue,
   EvaluationInstructionsValue,
@@ -42,6 +43,8 @@ export interface EvaluationRunPlan {
   cases: readonly EvaluationTaskValue[];
   linkSessions: boolean;
   sessionLink?: { attempts?: number; delayMs?: number };
+  /** Graph authored in the editor; replaces the derived shape when present. */
+  savedSpec?: EvaluationGraphSpec;
   /**
    * Cases executed at once. Defaults to 1: a case spawns a real agent, and
    * running several against one working directory is not something the runtimes
@@ -133,6 +136,7 @@ async function runCase(
     evaluators: plan.evaluators,
     linkSessions: plan.linkSessions,
     ...(plan.sessionLink ? { sessionLink: plan.sessionLink } : {}),
+    ...(plan.savedSpec ? { savedSpec: plan.savedSpec } : {}),
   };
   const graph = buildEvaluationCaseGraph(casePlan, dependencies);
   const execution = await executeEvaluationGraph({

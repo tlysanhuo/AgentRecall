@@ -4,6 +4,7 @@ import type {
   EvaluationDataset,
   EvaluationEvaluator,
   EvaluationExperiment,
+  EvaluationExperimentGraph,
   EvaluationNodeRecord,
   EvaluationRun,
   EvaluationRunPage,
@@ -157,6 +158,9 @@ export class EvaluationStore {
         evaluatorIds: evaluators.rows.map((item) => item.evaluator_id),
         skillName: row.skill_name != null ? String(row.skill_name) : null,
         skillHash: row.skill_hash != null ? String(row.skill_hash) : null,
+        graph: row.graph != null
+          ? jsonValue(row.graph) as EvaluationExperimentGraph
+          : null,
         createdAt: timestamp(row.created_at),
         updatedAt: timestamp(row.updated_at),
       };
@@ -167,8 +171,8 @@ export class EvaluationStore {
     await this.database.transaction(async (transaction) => {
       await transaction.query(
         `insert into agent_recall.evaluation_experiments (
-          id, name, dataset_id, agent_id, repetitions, skill_name, skill_hash, created_at, updated_at
-        ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          id, name, dataset_id, agent_id, repetitions, skill_name, skill_hash, graph, created_at, updated_at
+        ) values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
         on conflict (id) do update set
           name = excluded.name,
           dataset_id = excluded.dataset_id,
@@ -176,6 +180,7 @@ export class EvaluationStore {
           repetitions = excluded.repetitions,
           skill_name = excluded.skill_name,
           skill_hash = excluded.skill_hash,
+          graph = excluded.graph,
           updated_at = excluded.updated_at`,
         [
           value.id,
@@ -185,6 +190,7 @@ export class EvaluationStore {
           value.repetitions,
           value.skillName ?? null,
           value.skillHash ?? null,
+          value.graph ? JSON.stringify(value.graph) : null,
           new Date(value.createdAt),
           new Date(value.updatedAt),
         ],

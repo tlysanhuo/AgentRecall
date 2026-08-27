@@ -120,6 +120,32 @@ const evaluationEvaluatorSchema = z.object({
   createdAt: timestampSchema,
   updatedAt: timestampSchema,
 }).strict();
+const evaluationGraphBindingSchema = z.union([
+  z.string().min(3).max(200),
+  z.object({ from: z.string().min(3).max(200), onFailure: z.boolean().optional() }).strict(),
+]);
+const evaluationGraphNodeSchema = z.object({
+  id: z.string().trim().min(1).max(80),
+  type: z.string().trim().min(1).max(80),
+  enabled: z.boolean().optional(),
+  // Node config is per node type and validated by the graph builder before a run;
+  // the bound here only keeps an unreasonable payload out of the database.
+  config: z.record(z.string().max(80), z.unknown()).optional(),
+  in: z.record(z.string().max(80), evaluationGraphBindingSchema).optional(),
+  after: z.array(z.string().trim().min(1).max(80)).max(50).optional(),
+}).strict();
+const evaluationExperimentGraphSchema = z.object({
+  version: z.number().int().min(1).max(1_000_000),
+  spec: z.object({
+    name: z.string().trim().min(1).max(200),
+    version: z.number().int().min(1).max(1_000_000),
+    nodes: z.array(evaluationGraphNodeSchema).min(1).max(200),
+  }).strict(),
+  layout: z.record(
+    z.string().max(80),
+    z.object({ x: z.number(), y: z.number() }).strict(),
+  ),
+}).strict();
 const evaluationExperimentSchema = z.object({
   id: idSchema,
   name: z.string().trim().min(1).max(200),
@@ -127,6 +153,11 @@ const evaluationExperimentSchema = z.object({
   agentId: idSchema,
   evaluatorIds: z.array(idSchema).max(500),
   repetitions: z.number().int().min(1).max(5),
+  // Skill binding and the authored graph travel with the experiment, so an
+  // experiment loaded from the store can be saved back without losing either.
+  skillName: z.string().trim().max(200).nullish(),
+  skillHash: z.string().trim().max(200).nullish(),
+  graph: evaluationExperimentGraphSchema.nullish(),
   createdAt: timestampSchema,
   updatedAt: timestampSchema,
 }).strict();

@@ -1739,4 +1739,13 @@ export const POSTGRES_MIGRATIONS: readonly PostgresMigration[] = [{
         WHERE session_key IS NOT NULL;
     `,
   ],
+}, {
+  version: 43,
+  name: "store a custom evaluation graph per experiment",
+  statements: [
+    `
+      ALTER TABLE agent_recall.evaluation_experiments
+        ADD COLUMN IF NOT EXISTS graph jsonb;
+    `,
+  ],
 }];

@@ -144,6 +144,9 @@ export async function runEvaluation(input: RunEvaluationInput): Promise<Evaluati
       // runs where the host actually wired both halves of it.
       linkSessions: Boolean(input.resolveSession && input.readTrace),
       sessionLink: { attempts: 6, delayMs: 500 },
+      // An experiment with an authored graph runs that graph instead of the
+      // derived shape; the runner only rewrites its per-case and evaluator config.
+      ...(input.experiment.graph?.spec ? { savedSpec: input.experiment.graph.spec } : {}),
     },
     dependencies,
     {

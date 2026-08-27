@@ -185,6 +185,42 @@ describe("PostgreSQL evaluation store graph records", () => {
     expect(loaded!.results[0]!.nodes?.[2]!.verdicts).toHaveLength(1);
   });
 
+  it("round-trips an authored graph on the experiment", async () => {
+    const experiments = await store.listExperiments();
+    const target = experiments.find((item) => item.id === "experiment-1")!;
+    await store.saveExperiment({
+      ...target,
+      graph: {
+        version: 1,
+        spec: {
+          name: "authored",
+          version: 1,
+          nodes: [
+            { id: "task", type: "task_source", config: {} },
+            {
+              id: "agent",
+              type: "agent_execute",
+              config: { agentId: "agent-1" },
+              in: { task: "task.task" },
+            },
+          ],
+        },
+        layout: { task: { x: 10, y: 20 }, agent: { x: 240, y: 20 } },
+      },
+      updatedAt: Date.now(),
+    });
+
+    const reloaded = (await store.listExperiments()).find((item) => item.id === "experiment-1")!;
+    expect(reloaded.graph?.spec.nodes.map((node) => node.id)).toEqual(["task", "agent"]);
+    expect(reloaded.graph?.layout).toEqual({ task: { x: 10, y: 20 }, agent: { x: 240, y: 20 } });
+  });
+
+  it("leaves an experiment without an authored graph on the derived shape", async () => {
+    const reloaded = (await store.listExperiments()).find((item) => item.id === "experiment-1")!;
+
+    expect(reloaded.graph).toBeNull();
+  });
+
   it("keeps a run recorded before the graph engine readable", async () => {
     await store.saveRun({
       id: "run-legacy",

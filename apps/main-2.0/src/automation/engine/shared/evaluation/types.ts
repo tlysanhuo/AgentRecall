@@ -1,6 +1,12 @@
 import type { EvaluationNodeRecord } from "../../../../core/evaluation/graph/node";
+import type { EvaluationGraphSpec } from "../../../../core/evaluation/graph/builder";
 
 export type { EvaluationNodeRecord } from "../../../../core/evaluation/graph/node";
+export type {
+  EvaluationGraphNodeSpec,
+  EvaluationGraphSpec,
+  EvaluationInputBinding,
+} from "../../../../core/evaluation/graph/builder";
 export type {
   EvaluationFailureAttribution,
   EvaluationFailureType,
@@ -41,6 +47,20 @@ export interface EvaluationEvaluator {
   updatedAt: number;
 }
 
+/**
+ * A graph authored in the editor, replacing the shape the runner would otherwise
+ * derive from the experiment's dataset, agent and evaluators.
+ *
+ * `layout` is editor state only. It lives beside the spec rather than inside it
+ * so the engine contract stays free of presentation, while both still travel and
+ * version as one document.
+ */
+export interface EvaluationExperimentGraph {
+  version: number;
+  spec: EvaluationGraphSpec;
+  layout: Record<string, { x: number; y: number }>;
+}
+
 export interface EvaluationExperiment {
   id: string;
   name: string;
@@ -48,6 +68,12 @@ export interface EvaluationExperiment {
   agentId: string;
   evaluatorIds: string[];
   repetitions: number;
+  /**
+   * Custom graph for this experiment. Null or absent means the runner derives
+   * the standard shape, which is what every experiment created before the editor
+   * existed does.
+   */
+  graph?: EvaluationExperimentGraph | null;
   // Skill regression binding (phase four). Null for generic experiments created
   // before skill binding existed. skill_hash is the SKILL.md hash at the
   // time of the most recent run, refreshed before every run so each run is
