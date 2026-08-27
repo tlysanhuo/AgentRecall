@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ReactElement } from "react";
-import { AlertTriangle, Beaker, CheckCircle2, ChevronDown, ChevronRight, EyeOff, Link2Off, Lock, MousePointerClick, Pencil, Play, Plus, RefreshCw, Settings2, Trash2, Workflow, X } from "lucide-react";
+import { AlertTriangle, Beaker, CheckCircle2, ChevronDown, ChevronRight, Database, EyeOff, Gauge, History, Link2Off, Lock, MousePointerClick, Pencil, Play, Plus, RefreshCw, Settings2, Trash2, Workflow, X } from "lucide-react";
 
 import type { SkillTriggerLink } from "../../../../core/session-store";
 import type { SkillFinding } from "../../../../core/skill-eval-findings";
@@ -8,8 +8,10 @@ import type { SkillEvalDetail, SkillEvalOverview, SkillEvalSuite } from "../../.
 import type { EvaluationEvaluator, EvaluationNodeRecord, EvaluationRun, EvaluationRunSummary, ConfiguredAgent } from "../../../../automation/contracts";
 import { formatRelativeTime } from "../../../../core/format-session";
 import { localize, type LanguageMode } from "../../language";
-import { EvaluationFeaturePage } from "../automation/evaluation-feature-page";
+import { EvalDatasetsPage } from "./eval-datasets-page";
+import { EvalEvaluatorsPage } from "./eval-evaluators-page";
 import { EvalGraphPage } from "./eval-graph-page";
+import { EvalRunsPage } from "./eval-runs-page";
 import {
   formatDuration,
   formatRatio,
@@ -22,7 +24,7 @@ import {
   skillUseText,
 } from "./eval-format";
 
-type EvalTab = "skills" | "experiments" | "graph";
+type EvalTab = "skills" | "datasets" | "evaluators" | "graph" | "runs";
 
 export function EvalPage({
   language,
@@ -43,6 +45,9 @@ export function EvalPage({
 }): ReactElement {
   const l = (en: string, zh: string) => localize(language, en, zh);
   const [tab, setTab] = useState<EvalTab>("skills");
+  // Dataset and evaluator drafts live in their pages; leaving the tab unmounts
+  // them, so an unsaved edit has to be confirmed rather than silently dropped.
+  const [dirtyTabs, setDirtyTabs] = useState<Partial<Record<EvalTab, boolean>>>({});
   const [overview, setOverview] = useState<SkillEvalOverview | null>(null);
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null);
   const [detail, setDetail] = useState<SkillEvalDetail | null>(null);
@@ -63,6 +68,36 @@ export function EvalPage({
       setLoading(false);
     }
   }, []);
+
+
+  const confirmDiscard = useCallback(
+    () => window.confirm(l(
+      "Discard the unsaved changes on this tab?",
+      "当前标签页有未保存的修改，确定要放弃吗？",
+    )),
+    [l],
+  );
+
+  // Report unsaved work upward so leaving Eval entirely is guarded too.
+  useEffect(() => {
+    const anyDirty = Object.values(dirtyTabs).some(Boolean);
+    onNavigationGuardChange?.(anyDirty ? async () => confirmDiscard() : null);
+    return () => onNavigationGuardChange?.(null);
+  }, [confirmDiscard, dirtyTabs, onNavigationGuardChange]);
+
+  const switchTab = useCallback((next: EvalTab) => {
+    if (next === tab) return;
+    if (dirtyTabs[tab] && !confirmDiscard()) return;
+    setDirtyTabs((current) => ({ ...current, [tab]: false }));
+    setTab(next);
+  }, [confirmDiscard, dirtyTabs, tab]);
+
+  const reportDirty = useCallback(
+    (page: EvalTab, dirty: boolean) => setDirtyTabs((current) => current[page] === dirty
+      ? current
+      : { ...current, [page]: dirty }),
+    [],
+  );
 
   useEffect(() => {
     if (!enabled) {
@@ -132,14 +167,20 @@ export function EvalPage({
       </header>
 
       <nav className="eval-tabs" aria-label={l("Eval objects", "评测对象")}>
-        <button className={tab === "skills" ? "active" : ""} onClick={() => setTab("skills")}>
+        <button className={tab === "skills" ? "active" : ""} onClick={() => switchTab("skills")}>
           {l("Skills", "Skills")}
         </button>
-        <button className={tab === "experiments" ? "active" : ""} onClick={() => setTab("experiments")}>
-          {l("Experiments", "实验")}
+        <button className={tab === "datasets" ? "active" : ""} onClick={() => switchTab("datasets")}>
+          <Database size={12} /> {l("Datasets", "数据集")}
         </button>
-        <button className={tab === "graph" ? "active" : ""} onClick={() => setTab("graph")}>
-          <Workflow size={12} /> {l("Execution graph", "执行图")}
+        <button className={tab === "evaluators" ? "active" : ""} onClick={() => switchTab("evaluators")}>
+          <Gauge size={12} /> {l("Evaluators", "评分器")}
+        </button>
+        <button className={tab === "graph" ? "active" : ""} onClick={() => switchTab("graph")}>
+          <Workflow size={12} /> {l("Graphs", "执行图")}
+        </button>
+        <button className={tab === "runs" ? "active" : ""} onClick={() => switchTab("runs")}>
+          <History size={12} /> {l("Runs", "运行")}
         </button>
         <button disabled title={l("Coming later", "后续开放")}>
           <Lock size={12} /> Workflows
@@ -149,10 +190,14 @@ export function EvalPage({
         </button>
       </nav>
 
-      {tab === "graph" ? (
-        <EvalGraphPage language={language} onOpenSession={onOpenSession} />
-      ) : tab === "experiments" ? (
-        <EvaluationFeaturePage language={language} onNavigationGuardChange={onNavigationGuardChange} />
+      {tab === "datasets" ? (
+        <EvalDatasetsPage language={language} onDirtyChange={(dirty) => reportDirty("datasets", dirty)} />
+      ) : tab === "evaluators" ? (
+        <EvalEvaluatorsPage language={language} onDirtyChange={(dirty) => reportDirty("evaluators", dirty)} />
+      ) : tab === "graph" ? (
+        <EvalGraphPage language={language} />
+      ) : tab === "runs" ? (
+        <EvalRunsPage language={language} onOpenSession={onOpenSession} />
       ) : !enabled ? (
         <section className="eval-disabled-state">
           <span><Beaker size={24} /></span>

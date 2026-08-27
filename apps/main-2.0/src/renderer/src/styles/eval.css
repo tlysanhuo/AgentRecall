@@ -1170,3 +1170,103 @@
   border: 1px solid var(--border-strong);
   border-radius: 6px;
 }
+
+/* Dataset authoring: metadata row, bulk paste and the case list. */
+.eval-dataset-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px 12px;
+  align-items: end;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+}
+
+.eval-dataset-meta .eval-editor-actions { grid-column: 1 / -1; }
+
+.eval-dataset-import {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+}
+
+.eval-dataset-import textarea,
+.eval-dataset-cases textarea,
+.eval-editor-inspector textarea {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--panel-bg) 85%, var(--accent) 4%);
+  color: inherit;
+  font: inherit;
+  font-size: 11.5px;
+  resize: vertical;
+}
+
+.eval-dataset-import-errors {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding-left: 16px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.eval-dataset-cases {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.eval-dataset-cases li {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+}
+
+.eval-dataset-cases li > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* Evaluator kinds: each option states what it needs to be able to decide. */
+.eval-evaluator-kinds {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 6px;
+}
+
+.eval-evaluator-kinds button {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.eval-evaluator-kinds button.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--panel-bg) 80%, var(--accent) 8%);
+}
+
+.eval-evaluator-kinds button:disabled { cursor: default; opacity: 0.6; }
+.eval-evaluator-kinds strong { font-size: 11.5px; }
+.eval-evaluator-kinds small { color: var(--text-dim); font-size: 10.5px; line-height: 1.4; }
