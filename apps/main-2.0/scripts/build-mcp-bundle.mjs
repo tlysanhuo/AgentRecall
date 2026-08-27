@@ -15,6 +15,7 @@ await build({
     path.join(root, "src", "mcp", "skill-entry.ts"),
     path.join(root, "src", "mcp", "gateway-entry.ts"),
     path.join(root, "src", "mcp", "workflow-entry.ts"),
+    path.join(root, "src", "mcp", "eval-entry.ts"),
   ],
   outdir,
   bundle: true,

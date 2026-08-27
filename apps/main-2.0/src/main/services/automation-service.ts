@@ -21,6 +21,7 @@ import { McpRegistryStore } from "../../automation/engine/main/mcp-registry-stor
 import {
   BuiltinWorkflowMcpServer,
   type BuiltinSessionSearchServer,
+  type BuiltinEvalMcpServer,
   type BuiltinSkillMcpServer,
   type ManagedMcp,
   type McpBuiltinRuntime,
@@ -82,6 +83,7 @@ export interface AutomationServiceOptions {
   gatewayDirect?: Pick<NonNullable<StartMcpBridgeOptions["gateway"]>, "listSkills" | "getSkill" | "searchSessions" | "getSession">;
   builtinSessionSearch?: BuiltinSessionSearchServer;
   builtinSkills?: BuiltinSkillMcpServer;
+  builtinEval?: BuiltinEvalMcpServer;
   workflowMcp?: {
     isEnabled(): boolean;
     setEnabled(next: boolean): Promise<boolean>;
@@ -415,7 +417,7 @@ export class NativeAutomationService {
       registry: this.registryInstance,
       runtime: this.hubInstance,
       ...(options.mcpClients ? { clients: options.mcpClients } : {}),
-      builtins: [options.builtinSessionSearch, options.builtinSkills, this.workflowBuiltin]
+      builtins: [options.builtinSessionSearch, options.builtinSkills, options.builtinEval, this.workflowBuiltin]
         .filter((item): item is NonNullable<typeof item> => Boolean(item)) as ManagedMcp[],
     });
     this.currentSnapshot = this.hubInstance.snapshot();

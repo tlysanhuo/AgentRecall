@@ -168,6 +168,17 @@ export class BuiltinSkillMcpServer extends ManagedMcpServer {
 }
 
 /**
+ * The app-managed Eval source: dataset authoring plus read access to evaluators,
+ * graphs and run reports, so an agent can prepare and inspect an evaluation
+ * without the app UI.
+ */
+export class BuiltinEvalMcpServer extends ManagedMcpServer {
+  constructor(deps: ManagedMcpDeps) {
+    super(deps);
+  }
+}
+
+/**
  * The app-managed Workflow source for the progressive Gateway index. Ephemeral
  * Workflow and Review tools remain scoped to their owning execution context.
  */

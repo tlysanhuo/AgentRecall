@@ -174,6 +174,7 @@ import {
 import { NativeAutomationService } from "./services/automation-service";
 import {
   BuiltinSessionSearchServer,
+  BuiltinEvalMcpServer,
   BuiltinSkillMcpServer,
 } from "../automation/engine/main/mcp-builtin-server";
 import type { McpBuiltinRuntime } from "../automation/engine/main/mcp-builtin-server";
@@ -394,6 +395,12 @@ const mcpRuntimeStore = new Store<McpBuiltinRuntime>({
 
 const skillMcpRuntimeStore = new Store<McpBuiltinRuntime>({
   name: "skill-mcp-runtime",
+  defaults: { tools: [], disabledTools: [], status: "untested", createdAt: 0, updatedAt: 0 },
+});
+
+// Same runtime cache for the built-in eval MCP server.
+const evalMcpRuntimeStore = new Store<McpBuiltinRuntime>({
+  name: "eval-mcp-runtime",
   defaults: { tools: [], disabledTools: [], status: "untested", createdAt: 0, updatedAt: 0 },
 });
 
@@ -702,6 +709,27 @@ function createAutomationService(): NativeAutomationService {
       readRuntime: () => skillMcpRuntimeStore.store,
       writeRuntime: (runtime) => {
         skillMcpRuntimeStore.store = runtime;
+      },
+    }),
+    builtinEval: new BuiltinEvalMcpServer({
+      isEnabled: () => getSettings().evalMcpEnabled,
+      setEnabled: async (next) => {
+        settingsStore.set("evalMcpEnabled", next);
+        return next;
+      },
+      launchConfig: () => ({
+        id: "agent-recall-eval",
+        name: "AgentRecall Eval",
+        description: "读写评测数据集，并查看评分器、执行图与运行结果。",
+        command: "node",
+        args: [path.join(__dirname, "..", "..", "bin", "agent-recall-eval-mcp.mjs")],
+      }),
+      testEnv: () => ({
+        ...(postgresRuntime ? { AGENT_RECALL_DATABASE_URL: postgresRuntime.connectionUrl } : {}),
+      }),
+      readRuntime: () => evalMcpRuntimeStore.store,
+      writeRuntime: (runtime) => {
+        evalMcpRuntimeStore.store = runtime;
       },
     }),
     workflowMcp: {

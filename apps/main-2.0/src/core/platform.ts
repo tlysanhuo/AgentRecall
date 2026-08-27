@@ -141,6 +141,7 @@ export interface AppSettings {
   summaryReasoningEffort: SummaryReasoningEffort;
   sessionSearchMcpEnabled: boolean;
   skillMcpEnabled: boolean;
+  evalMcpEnabled: boolean;
   workflowMcpEnabled: boolean;
   workflowGlobalReviewEnabled: boolean;
   workflowRuntimeReviewEnabled: boolean;
@@ -227,6 +228,7 @@ export const defaultSettings: AppSettings = {
   summaryReasoningEffort: "medium",
   sessionSearchMcpEnabled: true,
   skillMcpEnabled: true,
+  evalMcpEnabled: false,
   workflowMcpEnabled: false,
   workflowGlobalReviewEnabled: false,
   workflowRuntimeReviewEnabled: false,

@@ -20,6 +20,7 @@
     "agent-recall-v2-mcp": "bin/agent-recall-mcp.mjs",
     "agent-recall-v2-skill-mcp": "bin/agent-recall-skill-mcp.mjs",
     "agent-recall-v2-workflow-mcp": "bin/agent-recall-workflow-mcp.mjs",
+    "agent-recall-v2-eval-mcp": "bin/agent-recall-eval-mcp.mjs",
     "agent-recall-v2-setup-mcp": "bin/setup-mcp.cjs"
   },
   "engines": {
