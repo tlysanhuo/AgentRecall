@@ -106,6 +106,7 @@ import {
   resumeActionLabel,
   resumeRouteMessage,
   sourceFilters,
+  supportsOpenAppSource,
   supportsResumeSource,
   migrationAgentLabel,
   migrationTargetsForSession,
@@ -2159,6 +2160,7 @@ export function App(): ReactElement {
           revealLabel={FILE_MANAGER_LABEL}
           showMacActions={IS_MAC}
           canResume={supportsResumeSource(contextMenu.session.source)}
+          canOpenApp={supportsOpenAppSource(contextMenu.session.source)}
           canStepcodeResume={Boolean(
             appSettings?.includeStepcode
             && contextMenu.session.environmentKind === "local"

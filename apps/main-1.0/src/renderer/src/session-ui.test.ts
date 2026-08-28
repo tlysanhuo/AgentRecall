@@ -8,6 +8,7 @@ import {
   sourceFilters,
   sourceMigrationAgent,
   sourceUiFamily,
+  supportsOpenAppSource,
   supportsResumeSource,
 } from "./session-ui";
 
@@ -42,6 +43,25 @@ describe("migrationTargetsForSession", () => {
     expect(supportsResumeSource(source)).toBe(false);
     expect(sourceMigrationAgent(source)).toBeNull();
     expect(migrationTargetsForSession(session, settings)).toEqual([]);
+  });
+});
+
+describe("supportsOpenAppSource", () => {
+  it("offers Open App only for sources that ship a desktop app", () => {
+    expect(supportsOpenAppSource("claude-cli")).toBe(true);
+    expect(supportsOpenAppSource("codex-app")).toBe(true);
+    expect(supportsOpenAppSource("codebuddy-cli")).toBe(true);
+  });
+
+  it("keeps Open App away from resumable sources that have no desktop app", () => {
+    for (const source of ["tclaude-cli", "tcodex-cli", "codewiz-cli", "deepseek-cli"] as const) {
+      expect(supportsResumeSource(source)).toBe(true);
+      expect(supportsOpenAppSource(source)).toBe(false);
+    }
+  });
+
+  it("stays false for a stale persisted source", () => {
+    expect(supportsOpenAppSource("not-a-source" as never)).toBe(false);
   });
 });
 

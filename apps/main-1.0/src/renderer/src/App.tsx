@@ -156,6 +156,7 @@ import {
   resumeRouteMessage,
   sourceFilters,
   supportsResumeSource,
+  supportsOpenAppSource,
   unsupportedMigrationTitle,
   migrationAgentLabel,
   migrationTargetsForSession,
@@ -2787,6 +2788,7 @@ export function App(): ReactElement {
           revealLabel={FILE_MANAGER_LABEL}
           showMacActions={IS_MAC}
           canResume={supportsResumeSource(contextMenu.session.source)}
+          canOpenApp={supportsOpenAppSource(contextMenu.session.source)}
           canMigrate={canMigrateSession(contextMenu.session, appSettings ?? DEFAULT_MIGRATION_TARGET_SETTINGS)}
           onRename={() => beginRename(contextMenu.session)}
           onAddTag={() => beginAddTag(contextMenu.session)}
@@ -3125,6 +3127,7 @@ function ContextMenu({
   revealLabel,
   showMacActions,
   canResume,
+  canOpenApp,
   canMigrate,
   onRename,
   onAddTag,
@@ -3147,6 +3150,7 @@ function ContextMenu({
   revealLabel: string;
   showMacActions: boolean;
   canResume: boolean;
+  canOpenApp: boolean;
   canMigrate: boolean;
   onRename: () => void;
   onAddTag: () => void;
@@ -3204,7 +3208,7 @@ function ContextMenu({
           <TerminalIcon size={14} /> Resume in iTerm
         </button>
       ) : null}
-      {canResume && showMacActions ? (
+      {canOpenApp && showMacActions ? (
         <button onClick={onOpenApp} disabled={localOnlyDisabled} title={openAppTitle}>
           <AppWindow size={14} /> Open App
         </button>
