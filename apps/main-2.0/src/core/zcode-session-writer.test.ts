@@ -29,6 +29,7 @@ describe("ZCode session writer", () => {
 
     try {
       expect(deleteZcodeSession(dbPath, "sess-delete")).toBe(true);
+      expect(fs.existsSync(`${dbPath}.bak`)).toBe(true);
       const resultDatabase = new DatabaseSync(dbPath);
       try {
         expect(resultDatabase.prepare("SELECT id FROM session ORDER BY id").all()).toEqual([
