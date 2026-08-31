@@ -640,6 +640,20 @@ export function buildRemoteSyncSshArgs(environment: SessionEnvironment, remoteCo
   return [...baseArgs.slice(0, separatorIndex), ...REMOTE_SYNC_SSH_OPTIONS, ...baseArgs.slice(separatorIndex)];
 }
 
+export function buildRemoteInteractiveSshArgs(
+  environment: SessionEnvironment,
+  remoteCommand: string,
+): string[] {
+  const baseArgs = buildSshArgs(environment, remoteCommand);
+  const separatorIndex = baseArgs.indexOf("--");
+  if (separatorIndex < 0) return [...REMOTE_INTERACTIVE_SSH_OPTIONS, ...baseArgs];
+  return [
+    ...baseArgs.slice(0, separatorIndex),
+    ...REMOTE_INTERACTIVE_SSH_OPTIONS,
+    ...baseArgs.slice(separatorIndex),
+  ];
+}
+
 async function runSystemRemote(environment: SessionEnvironment, remoteCommand: string): Promise<string> {
   if (environment.kind === "wsl") return runRemoteCommand(environment, remoteCommand, REMOTE_SYNC_EXEC_OPTIONS);
   return runSystemSsh(environment, remoteCommand);
@@ -936,6 +950,7 @@ const REMOTE_SUMMARY_SOURCES = new Set<SessionSource>(
 );
 
 const REMOTE_SYNC_SSH_OPTIONS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"];
+const REMOTE_INTERACTIVE_SSH_OPTIONS = ["-tt", "-o", "ConnectTimeout=10"];
 
 function parseRemotePayloadLine(line: string, lineNumber: number): RemoteSyncWireRecord {
   let parsed: unknown;

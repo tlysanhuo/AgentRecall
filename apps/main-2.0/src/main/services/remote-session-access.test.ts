@@ -107,6 +107,15 @@ function paginatedCodexPayload(rawId: string): RemoteSessionFilePayload {
 }
 
 describe("RemoteSessionAccess", () => {
+  it("returns forced-PTY SSH arguments for user-driven remote Resume", async () => {
+    const { access } = createAccess(true);
+
+    const args = await access.requireSshArgs(session);
+
+    expect(args?.filter((arg) => arg === "-tt")).toHaveLength(1);
+    expect(args?.indexOf("-tt")).toBeLessThan(args?.indexOf("--") ?? -1);
+  });
+
   it("uses the indexed source version instead of message presence for hydration", async () => {
     const stale = createAccess(false);
     await expect(stale.access.hasHydratedDetails(session.sessionKey)).resolves.toBe(false);

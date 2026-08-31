@@ -6,6 +6,7 @@ import { inflateRawSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
 import { createInMemoryStore } from "./session-store";
 import {
+  buildRemoteInteractiveSshArgs,
   buildRemoteSyncSshArgs,
   decodeRemotePayload,
   encodeRemotePayloadForTest,
@@ -17,7 +18,7 @@ import {
   syncRemoteEnvironment,
 } from "./remote-sync";
 import type { RemoteSessionFilePayload } from "./remote-session-loader";
-import type { SessionSearchResult } from "./types";
+import type { SessionEnvironment, SessionSearchResult } from "./types";
 
 function decodeCollectorScript(command: string): string {
   return inflateRawSync(Buffer.from(command.match(/b64decode\("([^"]+)"\)/)?.[1] ?? "", "base64")).toString("utf-8");
@@ -1801,11 +1802,42 @@ db.close()
     expect(args.slice(0, 4)).toEqual(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]);
     expect(args).toContain("--");
     expect(args.indexOf("-o")).toBeLessThan(args.indexOf("--"));
+    expect(args).not.toContain("-tt");
     expect(args.slice(args.indexOf("--"))).toEqual(["--", "devbox", "echo ok"]);
     expect(REMOTE_SYNC_EXEC_OPTIONS.timeout).toBeGreaterThan(0);
     expect(Number.isFinite(REMOTE_SYNC_EXEC_OPTIONS.timeout)).toBe(true);
 
     const dashedAliasEnvironment = { ...environment, hostAlias: "-oProxyCommand=bad" };
     expect(buildRemoteSyncSshArgs(dashedAliasEnvironment, "echo ok").slice(4)).toEqual(["--", "-oProxyCommand=bad", "echo ok"]);
+  });
+
+  it("builds interactive SSH args with one forced PTY before the destination terminator", () => {
+    const environment = {
+      id: "ssh:test",
+      kind: "ssh",
+      label: "test",
+      hostAlias: "devbox",
+      host: null,
+      user: null,
+      port: null,
+      authMode: "none",
+      identityFile: null,
+      enabled: true,
+    } as SessionEnvironment;
+    const args = buildRemoteInteractiveSshArgs(environment, "echo ok");
+    expect(args.filter((arg) => arg === "-tt")).toHaveLength(1);
+    expect(args).not.toContain("BatchMode=yes");
+    expect(args).toContain("ConnectTimeout=10");
+    expect(args.indexOf("-tt")).toBeLessThan(args.indexOf("--"));
+    expect(args.slice(args.indexOf("--"))).toEqual(["--", "devbox", "echo ok"]);
+
+    const passwordArgs = buildRemoteInteractiveSshArgs({
+      ...environment,
+      hostAlias: null,
+      host: "devbox.example.com",
+      authMode: "password",
+    }, "echo ok");
+    expect(passwordArgs).toContain("PreferredAuthentications=password,keyboard-interactive");
+    expect(passwordArgs).not.toContain("BatchMode=yes");
   });
 });

@@ -367,6 +367,7 @@ function buildResumeRuntimeProcessSpec(
   session: SessionSearchResult,
   settings: AppSettings,
   skipPermissions: boolean,
+  useRemoteBinary = false,
 ): Omit<ResumeProcessSpec, "displayCommand"> {
   const target = migrationTargetForResumeSource(session.source);
   if (!target) {
@@ -384,8 +385,12 @@ function buildResumeRuntimeProcessSpec(
     }
   }
 
+  // Local absolute CLI settings do not describe the SSH host. Interactive SSH
+  // resolves these stable command names through the remote user's own shell.
   return {
-    command: migrationBinary(target, settings),
+    command: useRemoteBinary && (target === "claude" || target === "codex")
+      ? target
+      : migrationBinary(target, settings),
     args,
     cwd: session.projectPath || undefined,
   };
@@ -435,9 +440,13 @@ function buildShellCommand(
 function buildResumeShellCommand(
   session: SessionSearchResult,
   settings: AppSettings,
-  opts: Required<Pick<ResumeOptions, "withCwd" | "skipPermissions" | "platform">> & { shell: ShellKind; homeDir?: string },
+  opts: Required<Pick<ResumeOptions, "withCwd" | "skipPermissions" | "platform">> & {
+    shell: ShellKind;
+    homeDir?: string;
+    useRemoteBinary?: boolean;
+  },
 ): string {
-  const spec = buildResumeRuntimeProcessSpec(session, settings, opts.skipPermissions);
+  const spec = buildResumeRuntimeProcessSpec(session, settings, opts.skipPermissions, opts.useRemoteBinary);
   return buildMigrationResumeShellCommand(spec, session.projectPath ?? "", opts.shell, opts.withCwd);
 }
 
@@ -510,13 +519,14 @@ export function getResumeCommand(
       ? formatPowershellWslDisplay(wslDistribution, innerCommand)
       : formatWslDisplayCommand(wslDistribution, innerCommand, platform);
   }
-  const spec = buildResumeRuntimeProcessSpec(session, settings, skipPermissions);
+  const spec = buildResumeRuntimeProcessSpec(session, settings, skipPermissions, Boolean(sshArgs));
   if (sshArgs) {
     // The remote command body always targets a POSIX shell; only the outer ssh
     // invocation is quoted for the local terminal (cmd carets vs PowerShell).
     const innerCommand = buildMigrationResumeShellCommand(spec, session.projectPath ?? "", "posix", withCwd);
-    if (shell === "powershell") return formatPowershellSshDisplay(sshArgs, innerCommand);
-    return formatSshDisplayCommand(sshArgs, innerCommand, platform);
+    const remoteCommand = remoteInteractiveCommand(sshArgs, innerCommand);
+    if (shell === "powershell") return formatPowershellSshDisplay(sshArgs, remoteCommand);
+    return formatSshDisplayCommand(sshArgs, remoteCommand, platform);
   }
   return buildMigrationResumeShellCommand(spec, session.projectPath ?? "", shell, withCwd);
 }
@@ -735,13 +745,14 @@ export function getResumeProcessSpec(
       }),
     };
   }
-  const spec = buildResumeRuntimeProcessSpec(session, settings, skipPermissions);
+  const spec = buildResumeRuntimeProcessSpec(session, settings, skipPermissions, Boolean(sshArgs));
 
   if (sshArgs) {
     const innerCommand = buildMigrationResumeShellCommand(spec, session.projectPath ?? "", "posix", true);
+    const remoteCommand = remoteInteractiveCommand(sshArgs, innerCommand);
     return {
       command: "ssh",
-      args: [...sshArgs, innerCommand],
+      args: [...sshArgs, remoteCommand],
       cwd: undefined,
       displayCommand: getResumeCommand(session, settings, {
         withCwd: true,
@@ -1254,8 +1265,9 @@ function getResumePowerShellCommand(
     shell: "posix",
     platform: "linux",
     homeDir: opts.homeDir,
+    useRemoteBinary: true,
   });
-  return formatPowershellSshDisplay(opts.sshArgs, innerCommand);
+  return formatPowershellSshDisplay(opts.sshArgs, remoteInteractiveCommand(opts.sshArgs, innerCommand));
 }
 
 function getResumeWslPowerShellCommand(
@@ -1474,10 +1486,20 @@ function migrationCliVersionErrorMessage(target: MigrationTarget, binary: string
   return `${prefix} --version failed for ${binary}.`;
 }
 
+function remoteUserShellCommand(command: string): string {
+  const preparedCommand = `if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi; ${command}`;
+  const quotedCommand = shellQuote(preparedCommand);
+  const script = `if [ -n "$SHELL" ] && [ -x "$SHELL" ]; then exec "$SHELL" -lic ${quotedCommand}; fi; ${preparedCommand}`;
+  return `bash -lc ${shellQuote(script)}`;
+}
+
+function remoteInteractiveCommand(sshArgs: string[], command: string): string {
+  return sshArgs.includes("-tt") ? remoteUserShellCommand(command) : command;
+}
+
 export function getRemoteMigrationCliVersionCommand(command: string, args: string[]): string {
   const invocation = buildShellCommand(command, args, null, { shell: "posix", withCwd: false });
-  const script = `if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi; ${invocation}`;
-  return `bash -lc ${shellQuote(script)}`;
+  return remoteUserShellCommand(invocation);
 }
 
 export async function inspectMigrationCli(

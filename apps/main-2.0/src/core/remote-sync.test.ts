@@ -5,7 +5,12 @@ import * as path from "node:path";
 import { inflateRawSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { createInMemoryStore } from "./postgres/test-session-store";
-import { syncRemoteEnvironment } from "./remote-sync";
+import {
+  buildRemoteInteractiveSshArgs,
+  buildRemoteSyncSshArgs,
+  syncRemoteEnvironment,
+} from "./remote-sync";
+import type { SessionEnvironment } from "./types";
 
 function decodeCollectorScript(command: string): string {
   const encoded = command.match(/b64decode\("([^"]+)"\)/)?.[1] ?? "";
@@ -13,6 +18,37 @@ function decodeCollectorScript(command: string): string {
 }
 
 describe("remote sync", () => {
+  it("separates interactive SSH PTY args from machine-readable sync args", () => {
+    const environment = {
+      id: "ssh:test",
+      kind: "ssh",
+      label: "test",
+      hostAlias: "devbox",
+      host: null,
+      user: null,
+      port: null,
+      authMode: "none",
+      identityFile: null,
+      enabled: true,
+    } as SessionEnvironment;
+    expect(buildRemoteSyncSshArgs(environment, "echo ok")).not.toContain("-tt");
+    const args = buildRemoteInteractiveSshArgs(environment, "echo ok");
+    expect(args.filter((arg) => arg === "-tt")).toHaveLength(1);
+    expect(args).not.toContain("BatchMode=yes");
+    expect(args).toContain("ConnectTimeout=10");
+    expect(args.indexOf("-tt")).toBeLessThan(args.indexOf("--"));
+    expect(args.slice(args.indexOf("--"))).toEqual(["--", "devbox", "echo ok"]);
+
+    const passwordArgs = buildRemoteInteractiveSshArgs({
+      ...environment,
+      hostAlias: null,
+      host: "devbox.example.com",
+      authMode: "password",
+    }, "echo ok");
+    expect(passwordArgs).toContain("PreferredAuthentications=password,keyboard-interactive");
+    expect(passwordArgs).not.toContain("BatchMode=yes");
+  });
+
   it("keeps Codex parent and child sessions distinct when a child rollout contains inherited parent metadata", async () => {
     const store = createInMemoryStore();
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "agent-recall-v2-remote-codex-"));
