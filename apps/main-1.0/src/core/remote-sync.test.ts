@@ -1319,6 +1319,65 @@ db.close()
     }
   });
 
+  it("collects OpenCode summaries from the remote opencode.db including subagent relations", async () => {
+    const store = createInMemoryStore();
+    const environment = upsertSshEnvironment(store);
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-remote-opencode-"));
+    const opencodeDir = path.join(tempHome, ".local", "share", "opencode");
+    fs.mkdirSync(opencodeDir, { recursive: true });
+    const opencodeDbPath = path.join(opencodeDir, "opencode.db");
+    execFileSync(
+      "python3",
+      [
+        "-c",
+        String.raw`
+import json, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.executescript('''
+CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL, title TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER, parent_id TEXT);
+CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+''')
+db.execute("INSERT INTO session (id, directory, title, time_created, time_updated) VALUES (?, ?, ?, ?, ?)", ("opencode-root", "/repo/opencode", "OpenCode remote root", 1780560000000, 1780560600000))
+db.execute("INSERT INTO session (id, directory, title, time_created, time_updated, parent_id) VALUES (?, ?, ?, ?, ?, ?)", ("opencode-child", "/repo/opencode", "OpenCode remote child", 1780560000000, 1780560600000, "opencode-root"))
+db.execute("INSERT INTO message VALUES (?, ?, ?, ?, ?)", ("oc-user", "opencode-root", "user", 1780560060000, json.dumps({"role": "user"})))
+db.execute("INSERT INTO part VALUES (?, ?, ?, ?, ?)", ("oc-user-part", "oc-user", "opencode-root", 1780560060000, json.dumps({"type": "text", "text": "opencode remote question"})))
+db.execute("INSERT INTO message VALUES (?, ?, ?, ?, ?)", ("oc-child-user", "opencode-child", "user", 1780560060000, json.dumps({"role": "user"})))
+db.execute("INSERT INTO part VALUES (?, ?, ?, ?, ?)", ("oc-child-part", "oc-child-user", "opencode-child", 1780560060000, json.dumps({"type": "text", "text": "opencode child question"})))
+db.commit()
+db.close()
+`,
+        opencodeDbPath,
+      ],
+      { encoding: "utf8" },
+    );
+
+    try {
+      await syncRemoteEnvironment(store, environment, {
+        runSsh: async (_environment, remoteCommand) => execFileSync("python3", ["-c", decodeCollectorScript(remoteCommand)], {
+          encoding: "utf8",
+          env: { ...process.env, HOME: tempHome },
+        }),
+      });
+
+      expect(store.getSession(`ssh:${environment.id}:opencode-cli:opencode-root`)).toMatchObject({
+        rawId: "opencode-root",
+        source: "opencode-cli",
+        isSubagent: false,
+        parentSessionId: null,
+      });
+      expect(store.getSession(`ssh:${environment.id}:opencode-cli:opencode-child`)).toMatchObject({
+        rawId: "opencode-child",
+        source: "opencode-cli",
+        isSubagent: true,
+        parentSessionId: "opencode-root",
+      });
+    } finally {
+      store.close();
+      fs.rmSync(tempHome, { recursive: true, force: true });
+    }
+  });
+
   it("fetches a remote session message page without transferring the full session payload", async () => {
     const store = createInMemoryStore();
     const environment = upsertSshEnvironment(store);

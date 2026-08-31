@@ -65,7 +65,7 @@ export interface SessionSourceDescriptor {
   liveFamily: LiveSessionFamily | null;
   migrationAgent: MigrationAgent | null;
   resumeTarget: MigrationTarget | null;
-  remoteFamily: "claude" | "codex" | "codebuddy" | "codewiz" | "qoder" | null;
+  remoteFamily: "claude" | "codex" | "codebuddy" | "codewiz" | "opencode" | "qoder" | null;
   nativeAppFamily: "claude" | "codex" | "codebuddy" | null;
   capabilities: SessionSourceCapabilities;
 }
@@ -155,7 +155,7 @@ export const SESSION_SOURCE_REGISTRY = {
   "opencode-cli": {
     id: "opencode-cli", label: "OpenCode", format: "opencode", family: "opencode", uiFamily: "other", statsGroup: null,
     optionalSetting: "includeOpenCode", pendingKey: "opencode", remoteCollectorOptional: false, liveFamily: "opencode", migrationAgent: null,
-    resumeTarget: null, remoteFamily: "codebuddy", nativeAppFamily: null,
+    resumeTarget: null, remoteFamily: "opencode", nativeAppFamily: null,
     capabilities: { live: true, resume: false, migrate: false, sessionSync: false, openApp: false },
   },
   "zcode-cli": {
