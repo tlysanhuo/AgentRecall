@@ -79,7 +79,11 @@ function createCascadeFixture(dbPath: string): void {
   }
 }
 
-function createTaskIndexFixture(root: string, options: { softDelete: boolean }): string {
+function createTaskIndexFixture(
+  root: string,
+  options: { softDelete: boolean },
+  taskIds: readonly string[] = ["sess-delete", "sess-keep"],
+): string {
   const taskIndexDirectory = path.join(root, "v2");
   fs.mkdirSync(taskIndexDirectory, { recursive: true });
   const taskIndexPath = path.join(taskIndexDirectory, "tasks-index.sqlite");
@@ -91,14 +95,18 @@ function createTaskIndexFixture(root: string, options: { softDelete: boolean }):
         CREATE TABLE task_group_members (group_id TEXT NOT NULL, task_id TEXT NOT NULL, PRIMARY KEY (group_id, task_id));
         CREATE TABLE task_group_view_node_orders (node_type TEXT NOT NULL, node_key TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (node_type, node_key));
       `);
-      db.prepare("INSERT INTO tasks (task_id, title) VALUES (?, ?), (?, ?)").run("sess-delete", "Delete me", "sess-keep", "Keep me");
-      db.prepare("INSERT INTO task_group_members (group_id, task_id) VALUES (?, ?), (?, ?)").run("group-a", "sess-delete", "group-a", "sess-keep");
+      db.prepare(`INSERT INTO tasks (task_id, title) VALUES ${taskIds.map(() => "(?, '')").join(", ")}`).run(...taskIds);
+      const groupId = "group-a";
+      db.prepare(`INSERT INTO task_group_members (group_id, task_id) VALUES ${taskIds.map(() => "(?, ?)").join(", ")}`).run(
+        ...taskIds.flatMap((taskId) => [groupId, taskId]),
+      );
       db.prepare(
-        "INSERT INTO task_group_view_node_orders (node_type, node_key, sort_order) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)",
-      ).run("task", "sess-delete", 0, "task", "sess-keep", 1, "group", "group-a", 0);
+        `INSERT INTO task_group_view_node_orders (node_type, node_key, sort_order) VALUES ${taskIds.map(() => "('task', ?, ?)").join(", ")}`,
+      ).run(...taskIds.flatMap((taskId, index) => [taskId, index]));
+      db.prepare("INSERT INTO task_group_view_node_orders (node_type, node_key, sort_order) VALUES ('group', ?, 0)").run(groupId);
     } else {
       db.exec("CREATE TABLE tasks (task_id TEXT PRIMARY KEY, title TEXT)");
-      db.prepare("INSERT INTO tasks (task_id, title) VALUES (?, ?), (?, ?)").run("sess-delete", "Delete me", "sess-keep", "Keep me");
+      db.prepare(`INSERT INTO tasks (task_id, title) VALUES ${taskIds.map(() => "(?, 'Task')").join(", ")}`).run(...taskIds);
     }
   } finally {
     db.close();
@@ -207,6 +215,7 @@ describe("ZCode session writer", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-recall-zcode-delete-cascade-"));
     const dbPath = databasePath(root);
     createCascadeFixture(dbPath);
+    const taskIndexPath = createTaskIndexFixture(root, { softDelete: true }, ["root", "child", "grandchild", "sess-keep"]);
 
     expect(deleteZcodeSessions(dbPath, ["root"])).toEqual(["root"]);
 
@@ -218,6 +227,17 @@ describe("ZCode session writer", () => {
       expect(db.prepare("SELECT COUNT(*) AS count FROM session_task_link").get()).toEqual({ count: 0 });
     } finally {
       db.close();
+    }
+    const taskIndex = new DatabaseSync(taskIndexPath);
+    try {
+      expect(taskIndex.prepare("SELECT task_id, deleted FROM tasks ORDER BY task_id").all()).toEqual([
+        { task_id: "child", deleted: 1 },
+        { task_id: "grandchild", deleted: 1 },
+        { task_id: "root", deleted: 1 },
+        { task_id: "sess-keep", deleted: 0 },
+      ]);
+    } finally {
+      taskIndex.close();
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
