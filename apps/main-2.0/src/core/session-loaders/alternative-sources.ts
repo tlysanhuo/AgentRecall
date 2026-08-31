@@ -740,6 +740,211 @@ export function* loadKimiSessionsIterator(
   }
 }
 
+export const GEMINI_DIR = ".gemini";
+
+function geminiContentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const part of content) {
+    if (!isRecord(part)) continue;
+    const text = stringField(part, "text");
+    if (text) parts.push(text);
+  }
+  return parts.filter(Boolean).join("\n");
+}
+
+interface GeminiChatMessageMeta {
+  id: string;
+  tokenKey: string | null;
+}
+
+function loadGeminiCliSessionFile(
+  filePath: string,
+  projectPath: string,
+  stat: VirtualSessionFileStat,
+  parentSessionId: string | null,
+): LoadedSession | null {
+  const rows = readJsonl(filePath).filter(isRecord);
+  if (!rows.length) return null;
+  const header = rows.find((row) => typeof row.sessionId === "string" && typeof row.projectHash === "string") ?? rows[0];
+  const rawId = stringField(header, "sessionId") || path.basename(filePath, ".jsonl");
+  const messages: SessionMessage[] = [];
+  const messageMeta: GeminiChatMessageMeta[] = [];
+  const traceDrafts: TraceEventDraft[] = [];
+  const tokenEntries = new Map<string, TokenUsageEvent>();
+  let summary = "";
+  let lastUpdatedMs = timestampMs(unknownField(header, "lastUpdated")) || timestampMs(unknownField(header, "startTime"));
+
+  const applyMessage = (row: Record<string, unknown>): void => {
+    const type = stringField(row, "type");
+    if (type !== "user" && type !== "gemini") return;
+    const timestamp = timestampMs(row.timestamp);
+    if (timestamp > lastUpdatedMs) lastUpdatedMs = timestamp;
+    const messageId = stringField(row, "id");
+    if (type === "user") {
+      const content = geminiContentText(unknownField(row, "content"));
+      if (!isMeaningfulUserMessage(content)) return;
+      messages.push(messageFromParts("user", content, timestampString(timestamp), messages.length));
+      messageMeta.push({ id: messageId, tokenKey: null });
+      return;
+    }
+    const tokens = objectField(row, "tokens");
+    const tokenKey = messageId ? `gemini:${messageId}` : null;
+    if (tokens && tokenKey) {
+      const input = numberField(tokens, "input");
+      const output = numberField(tokens, "output");
+      const cached = numberField(tokens, "cached");
+      const thoughts = numberField(tokens, "thoughts");
+      if (input > 0 || output > 0 || cached > 0 || thoughts > 0) {
+        putTokenEvent(tokenEntries, tokenEvent(timestamp, tokenKey, input, output, cached, thoughts));
+      }
+    }
+    const thoughts = unknownField(row, "thoughts");
+    if (Array.isArray(thoughts)) {
+      for (const thought of thoughts) {
+        if (typeof thought !== "string" || !thought.trim()) continue;
+        traceDrafts.push({
+          kind: "event",
+          source: "gemini",
+          title: normalizeTraceTitle("thought", ""),
+          detail: stringifyDetail(thought),
+          timestamp: timestampString(timestamp),
+          callId: null,
+          eventType: "gemini.thought",
+          status: "unknown",
+        });
+      }
+    }
+    const calls = unknownField(row, "toolCalls");
+    if (Array.isArray(calls)) {
+      for (const call of calls) {
+        if (!isRecord(call)) continue;
+        const name = stringField(call, "displayName") || stringField(call, "name");
+        if (!name) continue;
+        traceDrafts.push({
+          kind: "tool_call",
+          source: "gemini",
+          title: normalizeTraceTitle(name, firstStringField(call, ["description"])),
+          detail: stringifyDetail({ args: unknownField(call, "args"), result: unknownField(call, "result") }),
+          timestamp: timestampString(timestampMs(unknownField(call, "timestamp")) || timestamp),
+          callId: stringField(call, "id") || null,
+          eventType: "gemini.toolCall",
+          status: "unknown",
+        });
+      }
+    }
+    const content = geminiContentText(unknownField(row, "content"));
+    if (!content) return;
+    messages.push(messageFromParts("assistant", content, timestampString(timestamp), messages.length));
+    messageMeta.push({ id: messageId, tokenKey });
+  };
+
+  for (const row of rows) {
+    if (row === header) continue;
+    const setPatch = objectField(row, "$set");
+    if (setPatch) {
+      const patchedSummary = stringField(setPatch, "summary");
+      if (patchedSummary) summary = patchedSummary;
+      const patchedLastUpdated = timestampMs(setPatch.lastUpdated);
+      if (patchedLastUpdated > lastUpdatedMs) lastUpdatedMs = patchedLastUpdated;
+      const checkpointMessages = unknownField(setPatch, "messages");
+      if (Array.isArray(checkpointMessages)) {
+        messages.length = 0;
+        messageMeta.length = 0;
+        traceDrafts.length = 0;
+        tokenEntries.clear();
+        for (const checkpointRow of checkpointMessages) {
+          if (isRecord(checkpointRow)) applyMessage(checkpointRow);
+        }
+      }
+      continue;
+    }
+    const rewindTo = stringField(row, "$rewindTo");
+    if (rewindTo) {
+      const index = messageMeta.findIndex((meta) => meta.id === rewindTo);
+      const cut = index >= 0 ? index : 0;
+      for (const meta of messageMeta.slice(cut)) {
+        if (meta.tokenKey) tokenEntries.delete(meta.tokenKey);
+      }
+      messages.length = cut;
+      messageMeta.length = cut;
+      continue;
+    }
+    applyMessage(row);
+  }
+
+  if (!messages.length) return null;
+  const question = firstQuestion(messages);
+  return {
+    session: createIndexedSession({
+      keyPrefix: "gemini",
+      rawId,
+      source: "gemini-cli",
+      projectPath: projectPath || filePath,
+      filePath,
+      originalTitle: summary || cleanTitle(question) || rawId,
+      firstQuestion: cleanTitle(question),
+      timestamp: lastUpdatedMs || stat.mtimeMs,
+      tokenUsage: tokenUsageFromEvents([...tokenEntries.values()]),
+      stat,
+      isSubagent: parentSessionId !== null,
+      parentSessionId,
+    }),
+    messages,
+    tokenEvents: [...tokenEntries.values()],
+    traceEvents: dedupeTraceEvents(traceDrafts),
+  };
+}
+
+function geminiChatFileNameUsable(name: string): boolean {
+  return name.endsWith(".jsonl") && !name.includes(".tmp-") && !name.includes(".unreadable-");
+}
+
+export function* loadGeminiCliSessionsIterator(root: string, options: SessionLoadOptions): Generator<LoadedSession> {
+  const tmpRoot = path.join(root, "tmp");
+  let projectDirs: string[] = [];
+  try {
+    projectDirs = fs.readdirSync(tmpRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+      .map((entry) => path.join(tmpRoot, entry.name));
+  } catch {
+    return;
+  }
+  for (const projectDir of projectDirs) {
+    let projectPath = "";
+    try {
+      projectPath = fs.readFileSync(path.join(projectDir, ".project_root"), "utf8").trim();
+    } catch {
+      projectPath = "";
+    }
+    const chats = path.join(projectDir, "chats");
+    let chatEntries: fs.Dirent[] = [];
+    try {
+      chatEntries = fs.readdirSync(chats, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of chatEntries) {
+      if (entry.name.startsWith(".")) continue;
+      const childPath = path.join(chats, entry.name);
+      if (entry.isDirectory()) {
+        for (const filePath of walkJsonlFiles(childPath)) {
+          const stat = safeStat(filePath);
+          if (shouldSkipFile(options, filePath, stat)) continue;
+          const loaded = loadGeminiCliSessionFile(filePath, projectPath, stat, entry.name);
+          if (loaded) yield loaded;
+        }
+      } else if (entry.isFile() && geminiChatFileNameUsable(entry.name)) {
+        const stat = safeStat(childPath);
+        if (shouldSkipFile(options, childPath, stat)) continue;
+        const loaded = loadGeminiCliSessionFile(childPath, projectPath, stat, null);
+        if (loaded) yield loaded;
+      }
+    }
+  }
+}
+
 export const QWEN_DIR = ".qwen";
 
 function qwenRows(filePath: string): unknown[] {

@@ -38,7 +38,7 @@ export function tracePresentation(
   ) {
     return { category: "lifecycle", visibility: "turn_summary" };
   }
-  if (eventType === "codex.reasoning_summary" || eventType === "agent_reasoning" || eventType === "qwen.thought") {
+  if (eventType === "codex.reasoning_summary" || eventType === "agent_reasoning" || eventType === "qwen.thought" || eventType === "gemini.thought") {
     return { category: "reasoning", visibility: "timeline" };
   }
   if (

@@ -384,6 +384,26 @@ export const qwenAdapter: FormatAdapter = {
   },
 };
 
+export const geminiAdapter: FormatAdapter = {
+  format: "gemini",
+  parseLine(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const row = raw as Record<string, unknown>;
+    const role = row.type === "user" ? "user" : row.type === "gemini" ? "assistant" : null;
+    if (!role) return null;
+    const content = row.content;
+    const text = typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content
+          .map((part) => part && typeof part === "object" && typeof (part as Record<string, unknown>).text === "string" ? (part as Record<string, unknown>).text as string : "")
+          .filter(Boolean)
+          .join("\n")
+        : "";
+    return text ? { role, content: text, timestamp: timestampFromRaw(raw) } : null;
+  },
+};
+
 export function getFormatForSource(source: SessionSource): SessionFormat {
   return sessionSourceDescriptor(source).format;
 }
@@ -406,6 +426,7 @@ export function getAdapter(sourceOrFormat: SessionSource | SessionFormat): Forma
   if (sourceOrFormat === "deepseek") return deepseekAdapter;
   if (sourceOrFormat === "kimi") return kimiAdapter;
   if (sourceOrFormat === "qwen") return qwenAdapter;
+  if (sourceOrFormat === "gemini") return geminiAdapter;
   const format = getFormatForSource(sourceOrFormat);
   if (format === "claude") return claudeAdapter;
   if (format === "codebuddy") return codebuddyAdapter;
@@ -422,6 +443,7 @@ export function getAdapter(sourceOrFormat: SessionSource | SessionFormat): Forma
   if (format === "deepseek") return deepseekAdapter;
   if (format === "kimi") return kimiAdapter;
   if (format === "qwen") return qwenAdapter;
+  if (format === "gemini") return geminiAdapter;
   return codexAdapter;
 }
 

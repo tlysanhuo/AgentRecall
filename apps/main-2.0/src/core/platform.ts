@@ -105,6 +105,7 @@ export interface AppSettings {
   includePi: boolean;
   includeKimiCli: boolean;
   includeQwenCode: boolean;
+  includeGeminiCli: boolean;
   includeDeepSeekCli: boolean;
   evalEnabled: boolean;
   openVikingMemoryEnabled: boolean;
@@ -201,6 +202,7 @@ export const defaultSettings: AppSettings = {
   includePi: false,
   includeKimiCli: false,
   includeQwenCode: false,
+  includeGeminiCli: false,
   includeDeepSeekCli: false,
   evalEnabled: false,
   openVikingMemoryEnabled: false,

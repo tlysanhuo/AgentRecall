@@ -24,6 +24,7 @@ import {
   KIMI_LEGACY_DIR,
   PI_SESSIONS_DIR,
   QODER_DIR,
+  GEMINI_DIR,
   QWEN_DIR,
   TRAE_DIR_NAMES,
   loadCodeWizSessions,
@@ -34,6 +35,7 @@ import {
   loadOpenCodeSessions,
   loadPiSessionsIterator,
   loadKimiSessionsIterator,
+  loadGeminiCliSessionsIterator,
   loadQwenCodeSessionsIterator,
   loadQoderSessionsIterator,
   loadQoderIdeSessionsIterator,
@@ -117,6 +119,18 @@ function resolveKimiCodeRoot(homeDir: string, options: SessionLoadOptions): stri
   return options.homeDir === undefined
     ? process.env.KIMI_CODE_HOME?.trim() || path.join(homeDir, KIMI_CODE_DIR)
     : path.join(homeDir, KIMI_CODE_DIR);
+}
+
+function resolveGeminiCliRoot(homeDir: string, options: SessionLoadOptions): string {
+  if (options.homeDir !== undefined) return path.join(homeDir, GEMINI_DIR);
+  const configured = process.env.GEMINI_DIR?.trim();
+  if (!configured) return path.join(homeDir, GEMINI_DIR);
+  const expanded = configured === "~"
+    ? os.homedir()
+    : configured.startsWith("~/") || configured.startsWith("~\\")
+      ? path.join(os.homedir(), ...configured.slice(2).split(/[\\/]+/u).filter(Boolean))
+      : configured;
+  return path.resolve(expanded);
 }
 
 function resolveQwenCodeRoot(homeDir: string, options: SessionLoadOptions): string {
@@ -1917,6 +1931,9 @@ export function* loadDefaultSessionsIterator(options: SessionLoadOptions = {}): 
   if (options.includeQwenCode) {
     yield* loadQwenCodeSessionsIterator(resolveQwenCodeRoot(homeDir, options), options);
   }
+  if (options.includeGeminiCli) {
+    yield* loadGeminiCliSessionsIterator(resolveGeminiCliRoot(homeDir, options), options);
+  }
   if (options.includeTclaude) yield* loadClaudeCliSessionsIterator(path.join(homeDir, TCLAUDE_DIR), "tclaude-cli", options);
   if (options.includeTcodex) yield* loadCodexSessionsIterator(path.join(homeDir, TCODEX_DIR), "tcodex-cli", options);
   if (options.includeCodeBuddyCli) yield* loadCodeBuddyCliSessionsIterator(path.join(homeDir, CODEBUDDY_DIR), options);
@@ -1970,6 +1987,9 @@ export async function* loadDefaultSessionsAsyncIterator(options: SessionLoadOpti
   );
   if (options.includeQwenCode) {
     yield* loadQwenCodeSessionsIterator(resolveQwenCodeRoot(homeDir, options), options);
+  }
+  if (options.includeGeminiCli) {
+    yield* loadGeminiCliSessionsIterator(resolveGeminiCliRoot(homeDir, options), options);
   }
   if (options.includeTclaude) yield* loadClaudeCliSessionsIterator(path.join(homeDir, TCLAUDE_DIR), "tclaude-cli", options);
   if (options.includeTcodex) yield* loadCodexSessionsAsyncIterator(path.join(homeDir, TCODEX_DIR), "tcodex-cli", options);

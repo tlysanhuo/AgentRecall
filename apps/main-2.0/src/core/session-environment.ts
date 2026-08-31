@@ -24,6 +24,7 @@ export function canDeleteSessionLocally(session: SessionEnvironmentIdentity): bo
   return session.source !== "workbuddy-cli"
     && session.source !== "kimi-cli"
     && session.source !== "qwen-code"
+    && session.source !== "gemini-cli"
     && (session.environmentKind !== "ssh" || session.sourceAvailable === false);
 }
 
