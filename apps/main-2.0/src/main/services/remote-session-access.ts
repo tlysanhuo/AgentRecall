@@ -131,7 +131,7 @@ export class RemoteSessionAccess {
   private async loadDetails(sessionKey: string): Promise<void> {
     const store = this.dependencies.getStore();
     const session = await store.getSession(sessionKey);
-    if (!session || isLocalSessionEnvironment(session) || session.source === "codewiz-cli") return;
+    if (!session || isLocalSessionEnvironment(session) || session.source === "codewiz-cli" || session.source === "opencode-cli") return;
 
     const environment = await store.getEnvironment(session.environmentId);
     if (!environment) {
