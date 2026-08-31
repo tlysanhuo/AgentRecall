@@ -99,8 +99,8 @@ export function deleteZcodeSessions(dbPath: string, sessionIds: readonly string[
     db.exec("BEGIN IMMEDIATE");
     try {
       const existingIds = selectExistingSessionIds(db, normalizedIds);
-      if (existingIds.length > 0) {
-        const deleteIds = expandSessionDescendants(db, existingIds);
+      const deleteIds = expandSessionDescendants(db, existingIds);
+      if (deleteIds.size > 0) {
         deleteWorkflowArtifacts(db, deleteIds);
         deleteSessionRelatedRows(db, deleteIds);
         for (const ids of chunks([...deleteIds], 500)) {
@@ -108,7 +108,7 @@ export function deleteZcodeSessions(dbPath: string, sessionIds: readonly string[
         }
       }
       if (taskIndexAttached) {
-        softDeleteTaskIndexEntries(db, normalizedIds);
+        softDeleteTaskIndexEntries(db, [...new Set([...normalizedIds, ...deleteIds])]);
       }
       db.exec("COMMIT");
       return existingIds;
