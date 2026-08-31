@@ -90,7 +90,12 @@ import { assertMigrationTargetEnabled, isMigrationTarget, migrationTargetDescrip
 import { writeDbPointer } from "../core/app-paths";
 import { routeResumeSession } from "../core/resume-router";
 import { diagnoseRemoteEnvironment, preflightRemoteSessionResume } from "../core/remote-health";
-import { buildRemoteSyncSshArgs, fetchRemoteSessionFilePayload, fetchRemoteSessionMessagePage, syncRemoteEnvironment } from "../core/remote-sync";
+import {
+  buildRemoteInteractiveSshArgs,
+  fetchRemoteSessionFilePayload,
+  fetchRemoteSessionMessagePage,
+  syncRemoteEnvironment,
+} from "../core/remote-sync";
 import { REMOTE_PROCESS_EXEC_OPTIONS, runRemoteCommand, runRemoteCommandWithInput } from "../core/remote-process";
 import { loadRemoteSessionDetailPayload, loadWslSessionDetailPayload } from "../core/remote-session-loader";
 import { restoreRemotePortableSession, type RemoteSessionRestoreDependencies } from "../core/remote-session-restore";
@@ -99,7 +104,7 @@ import { RemoteWatchManager } from "../core/remote-watch";
 import { WslSessionIndexer } from "../core/wsl-session-indexer";
 import { SessionStore, type TraceEventQueryOptions } from "../core/session-store";
 import { buildCombinedSupabaseSetupSql, supabaseSqlEditorUrl } from "../core/supabase-setup";
-import { buildSshArgs, readUserSshConfig } from "../core/ssh-config";
+import { readUserSshConfig } from "../core/ssh-config";
 import { listWslDistributions } from "../core/wsl";
 import { SessionBulkDeleteService } from "./services/session-bulk-delete-service";
 import { LocalSessionIndexService } from "./services/local-session-index-service";
@@ -649,8 +654,7 @@ function sshArgsForSession(session: SessionSearchResult): string[] | undefined {
   const environment = store.getEnvironment(session.environmentId);
   if (!environment || environment.kind !== "ssh") return undefined;
   try {
-    const args = buildSshArgs(environment, "");
-    return args.slice(0, -1);
+    return buildRemoteInteractiveSshArgs(environment, "").slice(0, -1);
   } catch {
     return undefined;
   }
@@ -1462,10 +1466,6 @@ function migrationResumeDisplayCommand(target: MigrationTarget, sessionId: strin
   return getMigrationResumeProcessSpec(target, sessionId, projectPath, getSettings()).displayCommand;
 }
 
-function quotePosixToken(value: string): string {
-  return /^[A-Za-z0-9_\-./]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
-}
-
 function fallbackMigrationResumeDisplayCommand(target: MigrationTarget, sessionId: string, projectPath: string): string {
   return getSafeMigrationResumeCommand(target, sessionId, projectPath, getSettings());
 }
@@ -1531,7 +1531,7 @@ async function createSourceRemoteRestoreDependencies(
         await openResumeInTerminal(session, getSettings(), requireWslResumeOptions(session));
         return;
       }
-      const sshArgs = buildRemoteSyncSshArgs(environment, "").slice(0, -1);
+      const sshArgs = buildRemoteInteractiveSshArgs(environment, "").slice(0, -1);
       await openResumeInTerminal(session, getSettings(), { sshArgs });
     },
     resumeCommand: (target, targetSessionId, projectPath) =>
@@ -1625,8 +1625,8 @@ function remoteMigrationResumeDisplayCommand(
       requireWslResumeOptions(migrationLaunchSession(environment, target, sessionId, projectPath)),
     );
   }
-  const remoteCommand = getMigrationResumeProcessSpec(target, sessionId, projectPath, getSettings(), { platform: "linux" }).displayCommand;
-  return ["ssh", ...buildRemoteSyncSshArgs(environment, remoteCommand).map(quotePosixToken)].join(" ");
+  const sshArgs = buildRemoteInteractiveSshArgs(environment, "").slice(0, -1);
+  return getResumeCommand(migrationLaunchSession(environment, target, sessionId, projectPath), getSettings(), { sshArgs });
 }
 
 function localSessionMigrationRuntime(event: IpcMainInvokeEvent) {

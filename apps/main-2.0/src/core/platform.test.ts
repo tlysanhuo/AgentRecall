@@ -12,10 +12,10 @@ import {
 } from "./platform";
 
 describe("app settings", () => {
-  it("loads NVM before probing a migration CLI over SSH", () => {
-    expect(getRemoteMigrationCliVersionCommand("codex", ["--version"])).toBe(
-      'bash -lc \'if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi; codex --version\'',
-    );
+  it("keeps NVM as the fallback for migration CLI probes over SSH", () => {
+    const command = getRemoteMigrationCliVersionCommand("codex", ["--version"]);
+    expect(command).toContain('if [ -s "$HOME/.nvm/nvm.sh" ]');
+    expect(command).toContain("codex --version");
   });
 
   it.skipIf(process.platform === "win32")("probes bare migration CLI names through the user shell PATH", async () => {
@@ -56,6 +56,58 @@ describe("app settings", () => {
       else process.env.AGENT_RECALL_TEST_CLI_BIN = previous.userBin;
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("runs SSH migration probes and interactive resumes through the user's login shell", () => {
+    const probeCommand = getRemoteMigrationCliVersionCommand("codex", ["--version"]);
+    expect(probeCommand).toContain('exec "$SHELL" -lic');
+    const shellBranch = probeCommand.slice(
+      probeCommand.indexOf('exec "$SHELL" -lic'),
+      probeCommand.indexOf("; fi;"),
+    );
+    expect(shellBranch).toContain('. "$HOME/.nvm/nvm.sh"');
+
+    const session = {
+      source: "codex-cli",
+      rawId: "codex-1",
+      projectPath: "/repo",
+    } as SessionSearchResult;
+    const remoteSettings = {
+      ...defaultSettings,
+      codexBinary: "/local-only/codex",
+      claudeBinary: "/local-only/claude",
+    };
+    const command = getResumeCommand(session, remoteSettings, {
+      platform: "darwin",
+      sshArgs: ["-tt", "--", "alice@example.com"],
+    });
+
+    expect(command).not.toContain("/local-only/codex");
+    expect(command).toContain("ssh -tt -- 'alice@example.com'");
+    expect(command).toContain('exec "$SHELL" -lic');
+    expect(command).toContain("cd /repo && codex resume codex-1");
+
+    const claudeCommand = getResumeCommand({
+      ...session,
+      source: "claude-cli",
+      rawId: "claude-1",
+    }, remoteSettings, {
+      platform: "darwin",
+      sshArgs: ["-tt", "--", "alice@example.com"],
+    });
+    expect(claudeCommand).not.toContain("/local-only/claude");
+    expect(claudeCommand).toContain("claude --resume claude-1");
+
+    const windowsCommand = getResumeCommand(session, {
+      ...remoteSettings,
+      defaultTerminal: "Cmd",
+    }, {
+      platform: "win32",
+      sshArgs: ["-tt", "--", "alice@example.com"],
+    });
+    expect(windowsCommand).toContain('ssh -tt -- "alice@example.com"');
+    expect(windowsCommand).toContain('$SHELL');
+    expect(windowsCommand).toContain("^&^&");
   });
 
   it.each(["includeWorkBuddy", "includeQwenCode"] as const)(
