@@ -723,7 +723,7 @@ async function ensureRemoteSessionDetailsLoaded(sessionKey: string): Promise<voi
   const load = (async () => {
     const latest = store.getSession(sessionKey);
     if (!latest || isLocalSessionStorage(latest)) return;
-    if (latest.source === "codewiz-cli") return;
+    if (latest.source === "codewiz-cli" || latest.source === "opencode-cli") return;
     const environment = store.getEnvironment(latest.environmentId);
     if (environment?.kind === "wsl") {
       const payload = await fetchRemoteSessionFilePayload(environment, latest);
