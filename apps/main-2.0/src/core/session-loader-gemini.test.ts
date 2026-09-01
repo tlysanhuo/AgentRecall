@@ -3,6 +3,7 @@ import * as os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadDefaultSessions } from "./session-loader";
+import { deriveSessionTimeline } from "./turns/derive-turns";
 
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
@@ -59,7 +60,7 @@ describe("Gemini CLI sessions", () => {
     const chats = projectChats(root, "gemini-app", "/work/gemini-app");
     writeChat(path.join(chats, "session-2026-07-29T04-54-72d14847.jsonl"), [
       header("72d14847-09f0-4562-aa8e-f7b42bf11749"),
-      { id: "m-user", timestamp: "2026-07-29T04:55:00.000Z", type: "user", content: [{ text: "Fix the login flow" }] },
+      { id: "m-user", timestamp: "2026-07-29T04:55:00.000Z", type: "user", content: [{ text: "expanded @file model input" }], displayContent: "Fix the login flow" },
       {
         id: "m-gemini",
         timestamp: "2026-07-29T04:56:00.000Z",
@@ -68,7 +69,7 @@ describe("Gemini CLI sessions", () => {
         thoughts: [{ subject: "Auth plan", description: "Consider the auth module", timestamp: "2026-07-29T04:55:59.000Z" }],
         tokens: { input: 100, output: 20, cached: 5, thoughts: 3, tool: 0, total: 125 },
         model: "gemini-2.5-pro",
-        toolCalls: [{ id: "call-1", name: "read_file", displayName: "Read File", timestamp: "2026-07-29T04:56:01.000Z", args: { path: "auth.ts" }, status: "ok" }],
+        toolCalls: [{ id: "call-1", name: "read_file", displayName: "Read File", timestamp: "2026-07-29T04:56:01.000Z", args: { path: "auth.ts" }, result: [{ text: "file contents" }], status: "ok" }, { id: "call-2", name: "bash", displayName: "Shell", timestamp: "2026-07-29T04:56:02.000Z", args: { cmd: "ls" }, status: "cancelled" }],
       },
     ]);
 
@@ -84,8 +85,14 @@ describe("Gemini CLI sessions", () => {
     expect(loaded.messages.map((message) => message.content)).toEqual(["Fix the login flow", "I will inspect auth.ts"]);
     // Gemini 的 input 已含 cached:input 100 → 非缓存 95 + cached 5;total = 95+5+20(+tool)+3 = 123
     expect(loaded.session.tokenUsage?.totalTokens).toBe(123);
-    expect(loaded.traceEvents?.some((event) => event.kind === "tool_call" && event.callId === "call-1" && event.status === "completed")).toBe(true);
+    expect(loaded.traceEvents?.some((event) => event.kind === "tool_result" && event.callId === "call-1" && event.status === "completed")).toBe(true);
+    expect(loaded.traceEvents?.some((event) => event.kind === "tool_result" && event.callId === "call-2" && event.status === "aborted")).toBe(true);
+    expect(loaded.session.timestamp).toBe(Date.parse("2026-07-29T04:54:37.634Z"));
     expect(loaded.traceEvents?.some((event) => event.eventType === "gemini.thought" && event.timestamp === "2026-07-29T04:55:59.000Z")).toBe(true);
+    const timeline = deriveSessionTimeline({ sessionKey: loaded.session.sessionKey, messages: loaded.messages, tokenEvents: loaded.tokenEvents ?? [], traceEvents: loaded.traceEvents ?? [] });
+    const spans = timeline.turns.flatMap((turn) => turn.spans);
+    expect(spans.filter((span) => span.callId === "call-1")).toEqual([expect.objectContaining({ status: "completed", endedAt: expect.any(String) })]);
+    expect(spans.filter((span) => span.callId === "call-2")).toEqual([expect.objectContaining({ status: "aborted" })]);
   });
 
   it("rebuilds messages from checkpoints and applies rewinds", () => {

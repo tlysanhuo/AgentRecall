@@ -2347,21 +2347,33 @@ function resolveGeminiCliRoot(homeDir: string, options: SessionLoadOptions): str
 
 function geminiContentText(content: unknown): string {
   if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  const parts: string[] = [];
-  for (const part of content) {
-    if (!isRecord(part)) continue;
-    const text = stringField(part, "text");
-    if (text) parts.push(text);
+  if (Array.isArray(content)) {
+    const parts: string[] = [];
+    for (const part of content) {
+      if (typeof part === "string") {
+        if (part) parts.push(part);
+        continue;
+      }
+      if (!isRecord(part) || Array.isArray(part)) continue;
+      const text = stringField(part, "text");
+      if (text) parts.push(text);
+    }
+    return parts.filter(Boolean).join("\n");
   }
-  return parts.filter(Boolean).join("\n");
+  if (isRecord(content)) return geminiContentText([content]);
+  return "";
 }
 
-function geminiToolStatus(value: string): "completed" | "failed" | "unknown" {
+function geminiVisibleContent(row: Record<string, unknown>): string {
+  return geminiContentText(unknownField(row, "displayContent") || unknownField(row, "content"));
+}
+
+function geminiToolStatus(value: string): "completed" | "failed" | "aborted" | "unknown" {
   const normalized = value.trim().toLowerCase();
   if (!normalized) return "unknown";
   if (normalized.includes("ok") || normalized.includes("success") || normalized.includes("complete")) return "completed";
-  if (normalized.includes("error") || normalized.includes("fail") || normalized.includes("cancel")) return "failed";
+  if (normalized.includes("cancel")) return "aborted";
+  if (normalized.includes("error") || normalized.includes("fail")) return "failed";
   return "unknown";
 }
 
@@ -2395,7 +2407,7 @@ function loadGeminiCliSessionFile(
   const activeRows: Array<{ id: string; row: Record<string, unknown> }> = [];
   const activeIndex = new Map<string, number>();
   let summary = stringField(header, "summary");
-  let lastUpdatedMs = timestampMs(unknownField(header, "lastUpdated")) || timestampMs(unknownField(header, "startTime"));
+  const createdMs = timestampMs(unknownField(header, "startTime"));
 
   const upsert = (row: Record<string, unknown>): void => {
     const type = stringField(row, "type");
@@ -2416,8 +2428,6 @@ function loadGeminiCliSessionFile(
     const setPatch = objectField(row, "$set");
     if (setPatch) {
       if ("summary" in setPatch) summary = stringField(setPatch, "summary");
-      const patchedLastUpdated = timestampMs(setPatch.lastUpdated);
-      if (patchedLastUpdated > lastUpdatedMs) lastUpdatedMs = patchedLastUpdated;
       const checkpointMessages = unknownField(setPatch, "messages");
       if (Array.isArray(checkpointMessages)) {
         activeRows.length = 0;
@@ -2449,9 +2459,8 @@ function loadGeminiCliSessionFile(
   for (const { row } of activeRows) {
     const type = stringField(row, "type");
     const timestamp = timestampMs(row.timestamp);
-    if (timestamp > lastUpdatedMs) lastUpdatedMs = timestamp;
     if (type === "user") {
-      const content = geminiContentText(unknownField(row, "content"));
+      const content = geminiVisibleContent(row);
       if (!isMeaningfulUserMessage(content)) continue;
       messages.push(messageFromParts("user", content, timestampString(timestamp), messages.length));
       continue;
@@ -2501,19 +2510,33 @@ function loadGeminiCliSessionFile(
         if (!isRecord(call)) continue;
         const name = stringField(call, "displayName") || stringField(call, "name");
         if (!name) continue;
+        const callId = stringField(call, "id") || null;
+        const callTimestamp = timestampMs(unknownField(call, "timestamp")) || timestamp;
+        const title = normalizeTraceTitle(name, firstStringField(call, ["description"]));
         traceDrafts.push({
           kind: "tool_call",
           source: "gemini",
-          title: normalizeTraceTitle(name, firstStringField(call, ["description"])),
-          detail: stringifyDetail({ args: unknownField(call, "args"), result: unknownField(call, "result") }),
-          timestamp: timestampString(timestampMs(unknownField(call, "timestamp")) || timestamp),
-          callId: stringField(call, "id") || null,
+          title,
+          detail: stringifyDetail(unknownField(call, "args")),
+          timestamp: timestampString(callTimestamp),
+          callId,
           eventType: "gemini.toolCall",
+          status: "running",
+        });
+        // Gemini 的 toolCall 自带结果与终态,补配对 result 事件供 timeline 派生层闭合 span。
+        traceDrafts.push({
+          kind: "tool_result",
+          source: "gemini",
+          title,
+          detail: stringifyDetail(unknownField(call, "result")),
+          timestamp: timestampString(callTimestamp),
+          callId,
+          eventType: "gemini.toolResult",
           status: geminiToolStatus(stringField(call, "status")),
         });
       }
     }
-    const content = geminiContentText(unknownField(row, "content"));
+    const content = geminiVisibleContent(row);
     if (!content) continue;
     messages.push(messageFromParts("assistant", content, timestampString(timestamp), messages.length));
   }
@@ -2529,7 +2552,7 @@ function loadGeminiCliSessionFile(
       filePath,
       originalTitle: summary || cleanTitle(question) || rawId,
       firstQuestion: cleanTitle(question),
-      timestamp: lastUpdatedMs || stat.mtimeMs,
+      timestamp: createdMs || stat.mtimeMs,
       tokenUsage: tokenUsageFromEvents([...tokenEntries.values()]),
       stat,
       isSubagent: parentSessionId !== null,

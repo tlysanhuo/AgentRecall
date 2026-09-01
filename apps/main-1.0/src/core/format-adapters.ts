@@ -384,6 +384,19 @@ export const qwenAdapter: FormatAdapter = {
   },
 };
 
+function geminiPartListText(parts: unknown[]): string {
+  return parts
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (part && typeof part === "object" && typeof (part as Record<string, unknown>).text === "string") {
+        return (part as Record<string, unknown>).text as string;
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
 export const geminiAdapter: FormatAdapter = {
   format: "gemini",
   parseLine(raw) {
@@ -391,15 +404,14 @@ export const geminiAdapter: FormatAdapter = {
     const row = raw as Record<string, unknown>;
     const role = row.type === "user" ? "user" : row.type === "gemini" ? "assistant" : null;
     if (!role) return null;
-    const content = row.content;
+    const content = row.displayContent || row.content;
     const text = typeof content === "string"
       ? content
-      : Array.isArray(content)
-        ? content
-          .map((part) => part && typeof part === "object" && typeof (part as Record<string, unknown>).text === "string" ? (part as Record<string, unknown>).text as string : "")
-          .filter(Boolean)
-          .join("\n")
-        : "";
+      : content && typeof content === "object" && !Array.isArray(content)
+        ? geminiPartListText([content as Record<string, unknown>])
+        : Array.isArray(content)
+          ? geminiPartListText(content)
+          : "";
     return text ? { role, content: text, timestamp: timestampFromRaw(raw) } : null;
   },
 };
