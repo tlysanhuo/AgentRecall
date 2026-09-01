@@ -85,7 +85,7 @@ describe("Gemini CLI sessions", () => {
     // Gemini 的 input 已含 cached:input 100 → 非缓存 95 + cached 5;total = 95+5+20(+tool)+3 = 123
     expect(loaded.session.tokenUsage?.totalTokens).toBe(123);
     expect(loaded.traceEvents?.some((event) => event.kind === "tool_call" && event.callId === "call-1" && event.status === "completed")).toBe(true);
-    expect(loaded.traceEvents?.some((event) => event.eventType === "gemini.thought")).toBe(true);
+    expect(loaded.traceEvents?.some((event) => event.eventType === "gemini.thought" && event.timestamp === "2026-07-29T04:55:59.000Z")).toBe(true);
   });
 
   it("rebuilds messages from checkpoints and applies rewinds", () => {
@@ -190,6 +190,7 @@ describe("Gemini CLI sessions", () => {
     const chats = projectChats(root, "gemini-app", "/work/gemini-app");
     fs.writeFileSync(path.join(chats, "session-2026-07-29T10-00-legacy01.json"), JSON.stringify({
       sessionId: "legacy01-0000-0000-0000-000000000003",
+      summary: "Persisted legacy summary",
       startTime: "2026-07-29T10:00:00.000Z",
       lastUpdated: "2026-07-29T10:01:00.000Z",
       messages: [
@@ -200,7 +201,7 @@ describe("Gemini CLI sessions", () => {
 
     const [loaded] = loadDefaultSessions({ homeDir: root, includeGeminiCli: true });
 
-    expect(loaded.session).toMatchObject({ rawId: "legacy01-0000-0000-0000-000000000003", source: "gemini-cli" });
+    expect(loaded.session).toMatchObject({ rawId: "legacy01-0000-0000-0000-000000000003", source: "gemini-cli", originalTitle: "Persisted legacy summary" });
     expect(loaded.messages.map((message) => message.content)).toEqual(["Legacy request", "Legacy answer"]);
     expect(loaded.session.tokenUsage?.totalTokens).toBe(10);
   });

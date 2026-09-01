@@ -791,7 +791,7 @@ function loadGeminiCliSessionFile(
   const rawId = stringField(header, "sessionId") || path.basename(filePath, path.extname(filePath));
   const activeRows: Array<{ id: string; row: Record<string, unknown> }> = [];
   const activeIndex = new Map<string, number>();
-  let summary = "";
+  let summary = stringField(header, "summary");
   let lastUpdatedMs = timestampMs(unknownField(header, "lastUpdated")) || timestampMs(unknownField(header, "startTime"));
 
   const upsert = (row: Record<string, unknown>): void => {
@@ -812,8 +812,7 @@ function loadGeminiCliSessionFile(
     if (row === header) continue;
     const setPatch = objectField(row, "$set");
     if (setPatch) {
-      const patchedSummary = stringField(setPatch, "summary");
-      if (patchedSummary) summary = patchedSummary;
+      if ("summary" in setPatch) summary = stringField(setPatch, "summary");
       const patchedLastUpdated = timestampMs(setPatch.lastUpdated);
       if (patchedLastUpdated > lastUpdatedMs) lastUpdatedMs = patchedLastUpdated;
       const checkpointMessages = unknownField(setPatch, "messages");
@@ -872,11 +871,13 @@ function loadGeminiCliSessionFile(
       for (const thought of thoughts) {
         let subject = "";
         let description = "";
+        let thoughtTimestamp = timestamp;
         if (typeof thought === "string") {
           description = thought;
         } else if (isRecord(thought)) {
           subject = stringField(thought, "subject");
           description = stringField(thought, "description");
+          thoughtTimestamp = timestampMs(thought.timestamp) || timestamp;
         }
         if (!subject && !description.trim()) continue;
         traceDrafts.push({
@@ -884,7 +885,7 @@ function loadGeminiCliSessionFile(
           source: "gemini",
           title: normalizeTraceTitle(subject || "thought", ""),
           detail: stringifyDetail(description),
-          timestamp: timestampString(timestamp),
+          timestamp: timestampString(thoughtTimestamp),
           callId: null,
           eventType: "gemini.thought",
           status: "unknown",
