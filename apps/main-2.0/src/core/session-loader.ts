@@ -123,14 +123,14 @@ function resolveKimiCodeRoot(homeDir: string, options: SessionLoadOptions): stri
 
 function resolveGeminiCliRoot(homeDir: string, options: SessionLoadOptions): string {
   if (options.homeDir !== undefined) return path.join(homeDir, GEMINI_DIR);
-  const configured = process.env.GEMINI_DIR?.trim();
+  const configured = process.env.GEMINI_CLI_HOME?.trim();
   if (!configured) return path.join(homeDir, GEMINI_DIR);
   const expanded = configured === "~"
     ? os.homedir()
     : configured.startsWith("~/") || configured.startsWith("~\\")
       ? path.join(os.homedir(), ...configured.slice(2).split(/[\\/]+/u).filter(Boolean))
       : configured;
-  return path.resolve(expanded);
+  return path.join(path.resolve(expanded), GEMINI_DIR);
 }
 
 function resolveQwenCodeRoot(homeDir: string, options: SessionLoadOptions): string {

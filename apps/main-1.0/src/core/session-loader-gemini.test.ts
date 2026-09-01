@@ -65,7 +65,7 @@ describe("Gemini CLI sessions", () => {
         timestamp: "2026-07-29T04:56:00.000Z",
         type: "gemini",
         content: [{ text: "I will inspect auth.ts" }],
-        thoughts: ["Consider the auth module"],
+        thoughts: [{ subject: "Auth plan", description: "Consider the auth module", timestamp: "2026-07-29T04:55:59.000Z" }],
         tokens: { input: 100, output: 20, cached: 5, thoughts: 3, tool: 0, total: 125 },
         model: "gemini-2.5-pro",
         toolCalls: [{ id: "call-1", name: "read_file", displayName: "Read File", timestamp: "2026-07-29T04:56:01.000Z", args: { path: "auth.ts" }, status: "ok" }],
@@ -82,9 +82,9 @@ describe("Gemini CLI sessions", () => {
       parentSessionId: null,
     });
     expect(loaded.messages.map((message) => message.content)).toEqual(["Fix the login flow", "I will inspect auth.ts"]);
-    // AgentRecall 统计口径:total = input+output+cached+reasoning(Gemini 自身的 total 字段不含 thoughts)
-    expect(loaded.session.tokenUsage?.totalTokens).toBe(128);
-    expect(loaded.traceEvents?.some((event) => event.kind === "tool_call" && event.callId === "call-1")).toBe(true);
+    // Gemini 的 input 已含 cached:input 100 → 非缓存 95 + cached 5;total = 95+5+20(+tool)+3 = 123
+    expect(loaded.session.tokenUsage?.totalTokens).toBe(123);
+    expect(loaded.traceEvents?.some((event) => event.kind === "tool_call" && event.callId === "call-1" && event.status === "completed")).toBe(true);
     expect(loaded.traceEvents?.some((event) => event.eventType === "gemini.thought")).toBe(true);
   });
 
@@ -147,6 +147,79 @@ describe("Gemini CLI sessions", () => {
 
     expect(loaded).toHaveLength(1);
     expect(loaded[0].session.originalTitle).toBe("Custom summary");
+  });
+
+  it("replays enriched re-emissions under the same message id without duplication", () => {
+    const root = fixture();
+    const chats = projectChats(root, "gemini-app", "/work/gemini-app");
+    const geminiBase = { id: "dup-1", timestamp: "2026-07-29T08:00:00.000Z", type: "gemini", content: [{ text: "working on it" }] };
+    writeChat(path.join(chats, "session-2026-07-29T08-00-dup00001.jsonl"), [
+      header("dup00001-0000-0000-0000-000000000001"),
+      { id: "u", timestamp: "2026-07-29T07:59:00.000Z", type: "user", content: "Run the audit" },
+      { ...geminiBase, thoughts: [{ subject: "Plan", description: "first pass", timestamp: "2026-07-29T08:00:01.000Z" }], toolCalls: [{ id: "call-a", name: "grep", timestamp: "2026-07-29T08:00:02.000Z", args: { q: "auth" }, status: "ok" }] },
+      { ...geminiBase, tokens: { input: 50, output: 10, cached: 0, thoughts: 2, tool: 4, total: 66 } },
+    ]);
+
+    const [loaded] = loadDefaultSessions({ homeDir: root, includeGeminiCli: true });
+
+    expect(loaded.messages.map((message) => message.content)).toEqual(["Run the audit", "working on it"]);
+    expect(loaded.session.tokenUsage?.totalTokens).toBe(66);
+    expect(loaded.traceEvents?.filter((event) => event.eventType === "gemini.thought")).toHaveLength(1);
+    expect(loaded.traceEvents?.filter((event) => event.kind === "tool_call")).toHaveLength(1);
+  });
+
+  it("resolves rewinds that target filtered tool-only messages", () => {
+    const root = fixture();
+    const chats = projectChats(root, "gemini-app", "/work/gemini-app");
+    writeChat(path.join(chats, "session-2026-07-29T09-00-aaaa0001.jsonl"), [
+      header("aaaa0001-0000-0000-0000-000000000002"),
+      { id: "keep-user", timestamp: "2026-07-29T09:00:00.000Z", type: "user", content: "Keep this request" },
+      { id: "tool-only", timestamp: "2026-07-29T09:00:10.000Z", type: "gemini", content: [], toolCalls: [{ id: "call-z", name: "bash", timestamp: "2026-07-29T09:00:11.000Z", args: { cmd: "ls" }, status: "ok" }] },
+      { id: "tail", timestamp: "2026-07-29T09:00:20.000Z", type: "gemini", content: "later answer" },
+      { $rewindTo: "tool-only" },
+    ]);
+
+    const [loaded] = loadDefaultSessions({ homeDir: root, includeGeminiCli: true });
+
+    expect(loaded.messages.map((message) => message.content)).toEqual(["Keep this request"]);
+    expect(loaded.traceEvents?.some((event) => event.callId === "call-z")).toBe(false);
+  });
+
+  it("indexes legacy .json conversation records", () => {
+    const root = fixture();
+    const chats = projectChats(root, "gemini-app", "/work/gemini-app");
+    fs.writeFileSync(path.join(chats, "session-2026-07-29T10-00-legacy01.json"), JSON.stringify({
+      sessionId: "legacy01-0000-0000-0000-000000000003",
+      startTime: "2026-07-29T10:00:00.000Z",
+      lastUpdated: "2026-07-29T10:01:00.000Z",
+      messages: [
+        { id: "lu", timestamp: "2026-07-29T10:00:30.000Z", type: "user", content: "Legacy request" },
+        { id: "lg", timestamp: "2026-07-29T10:00:40.000Z", type: "gemini", content: "Legacy answer", tokens: { input: 8, output: 2, cached: 0, thoughts: 0, tool: 0, total: 10 } },
+      ],
+    }), "utf8");
+
+    const [loaded] = loadDefaultSessions({ homeDir: root, includeGeminiCli: true });
+
+    expect(loaded.session).toMatchObject({ rawId: "legacy01-0000-0000-0000-000000000003", source: "gemini-cli" });
+    expect(loaded.messages.map((message) => message.content)).toEqual(["Legacy request", "Legacy answer"]);
+    expect(loaded.session.tokenUsage?.totalTokens).toBe(10);
+  });
+
+  it("resolves the root from GEMINI_CLI_HOME", () => {
+    const syntheticHome = fixture();
+    const altHome = fixture();
+    const chats = path.join(altHome, ".gemini", "tmp", "gemini-app", "chats");
+    fs.mkdirSync(chats, { recursive: true });
+    writeChat(path.join(chats, "session-2026-07-29T11-00-bbb00002.jsonl"), [
+      header("bbb00002-0000-0000-0000-000000000004"),
+      { id: "u", timestamp: "2026-07-29T11:00:30.000Z", type: "user", content: "Alternate home request" },
+    ]);
+
+    vi.mocked(os.homedir).mockReturnValue(syntheticHome);
+    process.env.GEMINI_CLI_HOME = altHome;
+    const loaded = loadDefaultSessions({ includeGeminiCli: true }).filter((item) => item.session.source === "gemini-cli");
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0].session.rawId).toBe("bbb00002-0000-0000-0000-000000000004");
   });
 
   it("stays out of the default index until the optional source is enabled", () => {
