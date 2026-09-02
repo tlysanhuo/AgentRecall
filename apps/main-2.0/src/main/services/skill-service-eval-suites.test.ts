@@ -22,7 +22,11 @@ function makeEvaluationServiceMock(overrides: Record<string, unknown> = {}) {
     startExperiment: vi.fn(async () => "run-1"),
     getRun: vi.fn(async () => null),
     cancelRun: vi.fn(),
-    ensureBuiltinJudge: vi.fn(async (agentId: string) => ({ id: `builtin-judge-${agentId}` })),
+    ensureBuiltinJudge: vi.fn(async (agentId: string, skillName?: string) => ({
+      id: skillName === "rewrite-technical-tutorial"
+        ? `builtin-judge-${agentId}-rewrite-technical-tutorial`
+        : `builtin-judge-${agentId}`,
+    })),
     ...overrides,
   };
 }
@@ -225,11 +229,49 @@ describe("SkillService skill regression suites (phase four)", () => {
       cases: [{ input: "hello" }],
     });
 
-    expect(evaluations.ensureBuiltinJudge).toHaveBeenCalledWith("agent-1");
+    expect(evaluations.ensureBuiltinJudge).toHaveBeenCalledWith("agent-1", "review");
     const experimentArg = (evaluations.saveExperiment as ReturnType<typeof vi.fn>).mock.calls[0][0];
     // Built-in judge leads so it reads as the primary scoring signal.
     expect(experimentArg.evaluatorIds).toEqual(["builtin-judge-agent-1", "eval-custom"]);
     expect(suite.evaluatorIds).toContain("builtin-judge-agent-1");
+  });
+
+  it("binds the technical-writing suite to ten-dimension scoring and keeps case evidence", async () => {
+    const evaluations = makeEvaluationServiceMock();
+    const service = makeService(true, evaluations);
+    vi.spyOn(service, "listSkills").mockResolvedValue({ skills: [] } as never);
+
+    await service.createSkillEvalSuite({
+      skill: "rewrite-technical-tutorial",
+      name: "technical writing regression",
+      agentId: "agent-1",
+      evaluatorIds: [],
+      useBuiltinJudge: true,
+      repetitions: 1,
+      cases: [{
+        input: "Explain the mechanism",
+        context: "Source code evidence",
+        expectedOutput: "Keep source boundaries clear",
+      }],
+    });
+
+    expect(evaluations.ensureBuiltinJudge).toHaveBeenCalledWith(
+      "agent-1",
+      "rewrite-technical-tutorial",
+    );
+    const datasetArg = (evaluations.saveDataset as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(datasetArg.items[0].metadata.context).toBe("Source code evidence");
+    const experimentArg = (evaluations.saveExperiment as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(experimentArg.evaluatorIds).toEqual([
+      "builtin-judge-agent-1-rewrite-technical-tutorial",
+    ]);
+    expect(experimentArg.scoring).toEqual({
+      weightByLabels: { priority: { must: 2, should: 1 } },
+      resolvedThreshold: 0.75,
+      minCoverage: 1,
+      uncertain: "exclude",
+      requiredLabels: { priority: ["must"] },
+    });
   });
 
   // ── runSkillEvalSuite ──────────────────────────────────────────────
@@ -531,7 +573,7 @@ describe("SkillService skill regression suites (phase four)", () => {
 
     // Stale built-in id from the old channel is replaced by the one bound to
     // the current execution agent; custom evaluators pass through.
-    expect(fixture.evaluations.ensureBuiltinJudge).toHaveBeenCalledWith("agent-1");
+    expect(fixture.evaluations.ensureBuiltinJudge).toHaveBeenCalledWith("agent-1", "review");
     const datasetArg = (fixture.evaluations.saveDataset as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(datasetArg.id).toBe("dataset-1");
     // Existing ids survive positionally; only the appended case gets a fresh id.

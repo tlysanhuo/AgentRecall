@@ -100,6 +100,29 @@ describe("MCP bridge", () => {
     });
   });
 
+  test("lets Core Workflow claim its own node completion before V2 routing", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "agent-recall-core-workflow-output-"));
+    const submitNodeOutput = vi.fn(() => ({ ok: true, data: { status: "submitted" } }));
+    bridge = await startMcpBridge(new AgentHub(), {
+      discoveryPath: path.join(dir, "bridge.json"),
+      coreWorkflow: { submitNodeOutput },
+    });
+    const body = {
+      workflowId: "core-workflow",
+      runId: "core-run",
+      nodeId: "review",
+      executionId: "core-execution",
+      summary: "Done",
+      outputs: { verdict: "pass" },
+      proposals: [],
+    };
+
+    const response = await bridgeRequest("/mcp/workflow/node/complete", bridge.token, body);
+
+    expect(await response.json()).toEqual({ ok: true, data: { status: "submitted" } });
+    expect(submitNodeOutput).toHaveBeenCalledWith(body);
+  });
+
   test("routes a bound Review submission without exposing identity inside the result", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "agent-recall-mcp-review-submit-"));
     const submitWorkflowReview = vi.fn(() => ({ ok: true, accepted: true, workflowId: "wf-review", reviewedRevision: 2 }));

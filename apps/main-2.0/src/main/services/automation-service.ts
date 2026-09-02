@@ -61,6 +61,7 @@ import {
   type WorkflowPortableFileSelection,
 } from "./workflow-portable-service";
 import { parseWorkflowAgentOutputs, WorkflowCoreService } from "./workflow-core-service";
+import { WorkflowCoreOutputBroker } from "./workflow-core-output-broker";
 import type {
   McpExternalClientConnections,
   McpExternalClientUpdate,
@@ -108,6 +109,7 @@ export interface AutomationServiceOptions {
   readEvaluationTrajectory?: EvaluationServiceDependencies["readTrajectory"];
   readEvaluationSessionArtifact?: EvaluationServiceDependencies["readSessionArtifact"];
   readEvaluationFolderArtifact?: EvaluationServiceDependencies["readFolderArtifact"];
+  readEvaluationArtifactFiles?: EvaluationServiceDependencies["readArtifactFiles"];
   runEvaluationJudgeScript?: EvaluationServiceDependencies["runJudgeScript"];
   chooseEvaluationDatasetDirectory?: EvaluationServiceDependencies["chooseDatasetDirectory"];
 }
@@ -284,6 +286,7 @@ export class NativeAutomationService {
   private readonly listeners = new Set<SnapshotListener>();
   private readonly changeListeners = new Set<ChangeListener>();
   private readonly workflowRunStreamListeners = new Set<WorkflowRunStreamListener>();
+  private readonly workflowCoreOutputs = new WorkflowCoreOutputBroker();
   private readonly unsubscribeHub: () => void;
   private currentSnapshot: AppSnapshot;
   private changeSequence = 0;
@@ -328,14 +331,31 @@ export class NativeAutomationService {
         defaultWorkDir: () => this.hubInstance.getWorkDir(),
         executors: createWorkflowNodeExecutors({
           agentInvoker: {
-            invoke: async ({ agentId, prompt, outputs, workDir, onEvent, signal }) => {
-              const outputContract = outputs.map((field) => `- ${field.key}: ${field.description}`).join("\n");
-              const response = await this.configuredAgentExecutor.runOneShot({
-                configuredAgentId: agentId,
-                prompt: `${prompt}\n\n## Response format\nReturn only one JSON object. Use exactly these top-level fields:\n${outputContract}`,
-                workDir,
-              }, onEvent, signal);
-              return parseWorkflowAgentOutputs(response.output);
+            invoke: async ({ workflowId, runId, nodeId, node, agentId, prompt, outputs, workDir, onEvent, signal }) => {
+              const executionId = this.workflowCoreOutputs.begin({ workflowId, runId, node });
+              const outputContract = outputs.map((field) => (
+                `- ${field.key} (${field.type}${field.required ? ", required" : ", optional"}): ${field.description}`
+              )).join("\n");
+              try {
+                const response = await this.configuredAgentExecutor.runOneShot({
+                  configuredAgentId: agentId,
+                  prompt: [
+                    prompt,
+                    "",
+                    "## Completion protocol",
+                    "When the work is complete, call workflow_node_complete exactly once. Ordinary explanation text is not the structured result.",
+                    `Use nodeId ${JSON.stringify(nodeId)}, a concise summary, an outputs object with exactly the fields below, and proposals: [].`,
+                    outputContract,
+                    "Do not print the outputs JSON as ordinary assistant text. If workflow_node_complete is unavailable, return only the outputs JSON object as a compatibility fallback.",
+                  ].join("\n"),
+                  workDir,
+                  workflowExecution: { workflowId, runId, nodeId, executionId },
+                }, onEvent, signal);
+                const submitted = this.workflowCoreOutputs.finish(executionId);
+                return submitted ?? parseWorkflowAgentOutputs(response.output);
+              } finally {
+                this.workflowCoreOutputs.cancel(executionId);
+              }
             },
           },
           onStream: (event) => this.publishWorkflowRunStream(event),
@@ -381,6 +401,9 @@ export class NativeAutomationService {
         : {}),
       ...(options.readEvaluationFolderArtifact
         ? { readFolderArtifact: options.readEvaluationFolderArtifact }
+        : {}),
+      ...(options.readEvaluationArtifactFiles
+        ? { readArtifactFiles: options.readEvaluationArtifactFiles }
         : {}),
       ...(options.runEvaluationJudgeScript
         ? { runJudgeScript: options.runEvaluationJudgeScript }
@@ -587,6 +610,9 @@ export class NativeAutomationService {
       studio: {
         handleMcpRequest: (token, route, body) =>
           this.teamChat.handleMcpRequest(token, route, body),
+      },
+      coreWorkflow: {
+        submitNodeOutput: (body) => this.workflowCoreOutputs.submit(body),
       },
     });
     await this.refreshWorkflowGatewayCatalog();

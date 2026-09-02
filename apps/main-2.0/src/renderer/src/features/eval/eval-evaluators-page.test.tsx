@@ -4,6 +4,10 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EvaluationEvaluator } from "../../../../automation/contracts";
+import {
+  TECHNICAL_WRITING_DIMENSIONS,
+  TECHNICAL_WRITING_JUDGE_PROMPT,
+} from "../../../../automation/engine/shared/evaluation/technical-writing-eval";
 import { EvalEvaluatorsPage } from "./eval-evaluators-page";
 
 const harness = vi.hoisted(() => ({
@@ -215,5 +219,92 @@ describe("EvalEvaluatorsPage", () => {
     });
 
     expect(harness.saveEvaluator.mock.calls[0]![0]).toMatchObject({ dimension: "正确性" });
+  });
+});
+
+describe("EvalEvaluatorsPage dimensions", () => {
+  function check(overrides: Record<string, unknown>) {
+    return {
+      name: String(overrides.id),
+      kind: "contains",
+      threshold: 0.6,
+      enabled: true,
+      createdAt: 1,
+      updatedAt: 1,
+      ...overrides,
+    } as unknown as EvaluationEvaluator;
+  }
+
+  function groups(): string[] {
+    return [...container.querySelectorAll(".eval-dimension-group-name")]
+      .map((item) => item.textContent ?? "");
+  }
+
+  it("gathers the checks that judge one dimension under it", async () => {
+    // Scores inside a dimension are averaged before dimensions combine, so the
+    // grouping is what the score means — not a display convenience.
+    harness.listEvaluators.mockResolvedValue([
+      check({ id: "rubric", name: "语言自然", kind: "llm_judge", dimension: "正确性" }),
+      check({ id: "conclusion", name: "必须含结论", kind: "script", dimension: "正确性" }),
+      check({ id: "brief", name: "简洁", kind: "script", dimension: "简洁性" }),
+    ]);
+    await render();
+
+    expect(groups()).toEqual(["正确性", "简洁性"]);
+    const first = container.querySelectorAll(".eval-dimension-group")[0]!;
+    expect([...first.querySelectorAll(".eval-graph-run-name")].map((item) => item.textContent))
+      .toEqual(["语言自然", "必须含结论"]);
+    // The group says how it judges, which is the question a reader has.
+    expect(first.textContent).toContain("LLM 评判");
+    expect(first.textContent).toContain("脚本");
+  });
+
+  it("treats a check with no dimension as its own, named after itself", async () => {
+    // Mirrors the engine, which falls back to the evaluator when no dimension is set.
+    harness.listEvaluators.mockResolvedValue([check({ id: "loose", name: "散装检查" })]);
+    await render();
+
+    expect(groups()).toEqual(["散装检查"]);
+  });
+
+  it("expands a multi-verdict technical judge into its ten visible dimensions", async () => {
+    harness.listEvaluators.mockResolvedValue([
+      check({
+        id: "technical",
+        name: "技术教程十维评审",
+        kind: "llm_judge",
+        prompt: TECHNICAL_WRITING_JUDGE_PROMPT,
+      }),
+    ]);
+
+    await render();
+
+    expect(groups()).toEqual(TECHNICAL_WRITING_DIMENSIONS.map((item) => item.name));
+    expect(container.querySelectorAll(".eval-dimension-priority.is-must")).toHaveLength(7);
+    expect(container.querySelectorAll(".eval-dimension-priority.is-should")).toHaveLength(3);
+  });
+
+  it("puts a new check in the dimension it was added under", async () => {
+    harness.listEvaluators.mockResolvedValue([
+      check({ id: "rubric", name: "语言自然", kind: "llm_judge", dimension: "正确性" }),
+    ]);
+    await render();
+
+    await act(async () => {
+      (container.querySelector('[aria-label="添加检查"]') as HTMLButtonElement).click();
+    });
+
+    expect(harness.saveEvaluator.mock.calls[0]![0]).toMatchObject({ dimension: "正确性" });
+  });
+
+  it("names a brand new dimension after itself so it does not land in someone else's", async () => {
+    await render();
+
+    await act(async () => {
+      button("新建维度").click();
+    });
+
+    const created = harness.saveEvaluator.mock.calls[0]![0];
+    expect(created.dimension).toBe(created.name);
   });
 });

@@ -1,5 +1,7 @@
 import type { PostgresDatabase, PostgresQueryable } from "../../../core/postgres/database";
 import type {
+  EvaluationArtifactFile,
+  EvaluationCaseArtifact,
   EvaluationCaseResult,
   EvaluationDataset,
   EvaluationDimensionScore,
@@ -489,7 +491,7 @@ export class EvaluationStore {
            join agent_recall.evaluation_case_results c
              on c.id = s.case_result_id
           where c.run_id = $1
-          order by s.case_result_id, s.evaluator_id`,
+          order by s.case_result_id, s.evaluator_id, s.dimension`,
         [row.id],
       ),
       this.database.query(
@@ -548,6 +550,22 @@ export class EvaluationStore {
         input: String(result.input),
         ...(result.expected_output ? { expectedOutput: String(result.expected_output) } : {}),
         output: String(result.output),
+        ...(result.artifact_origin_kind
+          ? {
+              artifact: {
+                origin: {
+                  kind: String(result.artifact_origin_kind) as
+                    EvaluationCaseArtifact["origin"]["kind"],
+                  ...(result.artifact_origin_reference
+                    ? { reference: String(result.artifact_origin_reference) }
+                    : {}),
+                },
+                ...(result.artifact_files
+                  ? { files: jsonObjectArray<EvaluationArtifactFile>(result.artifact_files) }
+                  : {}),
+              },
+            }
+          : {}),
         ...(result.error ? { error: String(result.error) } : {}),
         durationMs: Number(result.duration_ms),
         scores: scoresByCase.get(String(result.id)) ?? [],
@@ -602,10 +620,11 @@ export class EvaluationStore {
         id, run_id, dataset_item_id, repetition, input, expected_output,
         output, error, duration_ms, session_key, skill_name, skill_hash,
         skill_content_length, unscored_reason, gate_passed,
-        score, passed, coverage, dimensions, by_label, skipped_evaluator_ids
+        score, passed, coverage, dimensions, by_label, skipped_evaluator_ids,
+        artifact_origin_kind, artifact_origin_reference, artifact_files
       ) values (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-        $16, $17, $18, $19::jsonb, $20::jsonb, $21::jsonb
+        $16, $17, $18, $19::jsonb, $20::jsonb, $21::jsonb, $22, $23, $24::jsonb
       )`,
       [
         result.id,
@@ -631,6 +650,14 @@ export class EvaluationStore {
         result.skippedEvaluatorIds && result.skippedEvaluatorIds.length > 0
           ? JSON.stringify(result.skippedEvaluatorIds)
           : null,
+        result.artifact?.origin.kind ?? null,
+        result.artifact?.origin.reference ?? null,
+        // An empty list is stored as null: "no files" and "files not observed"
+        // are different answers, and only the second one is what an absent
+        // artifact file list means.
+        result.artifact?.files && result.artifact.files.length > 0
+          ? JSON.stringify(result.artifact.files)
+          : null,
       ],
     );
     await this.insertCaseNodes(transaction, result);
@@ -651,7 +678,10 @@ export class EvaluationStore {
           score.durationMs,
           score.tokenCount ?? null,
           score.estimatedCost ?? null,
-          score.dimension ?? null,
+          // One LLM judge can emit several independently scored dimensions.
+          // The database key includes this value, so legacy single-verdict
+          // evaluators use their id as the same stable default as the scorer.
+          score.dimension ?? score.evaluatorId,
         ],
       );
     }

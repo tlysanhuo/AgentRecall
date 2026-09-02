@@ -6,6 +6,10 @@ import {
   type EvaluationVerdictStatus,
 } from "../graph/node";
 import {
+  parseEvaluationDimensionContract,
+  type EvaluationDimensionContractItem,
+} from "../dimension-contract";
+import {
   ARTIFACT_PORT,
   TASK_PORT,
   TRAJECTORY_PORT,
@@ -212,23 +216,54 @@ export function createLlmJudgeNode(
           facts: { evaluatorId, outputLength: judged.output.length },
         });
       }
-      if (parsed.score === null) {
+      const dimensionContract = parseEvaluationDimensionContract(template);
+      if (dimensionContract.length > 0 && !matchesDimensionContract(parsed, dimensionContract)) {
+        return evaluationExcused.judge("judge_dimensions_incomplete", {
+          facts: {
+            evaluatorId,
+            expectedDimensions: dimensionContract.map((item) => item.name),
+            receivedDimensions: parsed.map((item) => item.dimension ?? ""),
+          },
+        });
+      }
+      if (parsed.some((item) => item.score === null)) {
         return evaluationExcused.judge("judge_score_missing", {
-          facts: { evaluatorId, ...(parsed.reason ? { judgeReason: parsed.reason } : {}) },
+          facts: {
+            evaluatorId,
+            ...(parsed.find((item) => item.score === null)?.reason
+              ? { judgeReason: parsed.find((item) => item.score === null)!.reason }
+              : {}),
+          },
         });
       }
 
+      const contractByName = new Map(dimensionContract.map((item) => [item.name, item]));
       return evaluationPass({
-        verdicts: [buildVerdict({
-          nodeId: context.nodeId,
-          config: context.config,
-          evaluator: "llm_judge",
-          raw: parsed.score,
-          ...(parsed.reason ? { reason: parsed.reason } : {}),
-          ...(parsed.evidence ? { evidence: parsed.evidence } : {}),
-          ...(parsed.failedCriteria ? { failedCriteria: parsed.failedCriteria } : {}),
-          durationMs: judged.durationMs,
-        })],
+        verdicts: parsed.map((item, index) => {
+          const contracted = item.dimension ? contractByName.get(item.dimension) : undefined;
+          const config = item.dimension
+            ? {
+                ...context.config,
+                dimension: item.dimension,
+                ...(contracted?.priority ? { priority: contracted.priority } : {}),
+              }
+            : context.config;
+          const verdict = buildVerdict({
+            nodeId: context.nodeId,
+            config,
+            evaluator: "llm_judge",
+            raw: item.score!,
+            ...(item.reason ? { reason: item.reason } : {}),
+            ...(item.evidence ? { evidence: item.evidence } : {}),
+            ...(item.failedCriteria ? { failedCriteria: item.failedCriteria } : {}),
+            // One judge call produced every verdict. Recording its latency once
+            // avoids making a ten-dimensional rubric look ten times slower.
+            durationMs: index === 0 ? judged.durationMs : 0,
+          });
+          return parsed.length > 1
+            ? { ...verdict, verdictId: `${verdict.verdictId}:${item.dimension ?? index}` }
+            : verdict;
+        }),
       });
     },
   });
@@ -416,14 +451,15 @@ export function createScriptTrajectoryJudgeNode(
   });
 }
 
-interface ParsedJudgeOutput {
+interface ParsedJudgeVerdict {
   score: number | null;
+  dimension?: string;
   reason?: string;
   evidence?: string[];
   failedCriteria?: string[];
 }
 
-function parseJudgeOutput(output: string): ParsedJudgeOutput | null {
+function parseJudgeOutput(output: string): ParsedJudgeVerdict[] | null {
   const block = output.match(/\{[\s\S]*\}/)?.[0];
   if (!block) return null;
   let value: unknown;
@@ -434,18 +470,43 @@ function parseJudgeOutput(output: string): ParsedJudgeOutput | null {
   }
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;
-  const rawScore = Number(record.score);
+  if (Array.isArray(record.verdicts)) {
+    const verdicts = record.verdicts
+      .map((item) => parsedJudgeVerdict(item))
+      .filter((item): item is ParsedJudgeVerdict => item !== null);
+    return verdicts.length > 0 ? verdicts : null;
+  }
+  const verdict = parsedJudgeVerdict(record);
+  return verdict ? [verdict] : null;
+}
+
+function parsedJudgeVerdict(value: unknown): ParsedJudgeVerdict | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const rawScore = typeof record.score === "number" ? record.score : Number.NaN;
+  const dimension = typeof record.dimension === "string" ? record.dimension.trim() : "";
   return {
     // A judge that answered without a usable number has not scored anything.
     // Coercing that to 0 is indistinguishable from a judge that deliberately
     // failed the answer.
     score: Number.isFinite(rawScore) ? Math.max(0, Math.min(1, rawScore)) : null,
+    ...(dimension ? { dimension } : {}),
     ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
     ...(stringArray(record.evidence) ? { evidence: stringArray(record.evidence)! } : {}),
     ...(stringArray(record.failedCriteria)
       ? { failedCriteria: stringArray(record.failedCriteria)! }
       : {}),
   };
+}
+
+function matchesDimensionContract(
+  verdicts: readonly ParsedJudgeVerdict[],
+  contract: readonly EvaluationDimensionContractItem[],
+): boolean {
+  if (verdicts.length !== contract.length) return false;
+  const received = verdicts.map((item) => item.dimension ?? "");
+  return new Set(received).size === received.length
+    && contract.every((item) => received.includes(item.name));
 }
 
 function stringArray(value: unknown): string[] | undefined {

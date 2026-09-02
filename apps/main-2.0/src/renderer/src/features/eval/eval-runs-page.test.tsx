@@ -13,7 +13,10 @@ import { EvalRunsPage } from "./eval-runs-page";
 const harness = vi.hoisted(() => ({
   listRuns: vi.fn(),
   getRun: vi.fn(),
+  deleteRun: vi.fn(),
   listExperiments: vi.fn(),
+  listEvaluators: vi.fn(),
+  confirm: vi.fn(),
 }));
 
 function summary(overrides: Partial<EvaluationRunSummary> = {}): EvaluationRunSummary {
@@ -29,7 +32,7 @@ function summary(overrides: Partial<EvaluationRunSummary> = {}): EvaluationRunSu
   };
 }
 
-function experiment(): EvaluationExperiment {
+function experiment(overrides: Partial<EvaluationExperiment> = {}): EvaluationExperiment {
   return {
     id: "experiment-1",
     name: "Login regression",
@@ -39,6 +42,7 @@ function experiment(): EvaluationExperiment {
     repetitions: 1,
     createdAt: 1,
     updatedAt: 1,
+    ...overrides,
   };
 }
 
@@ -105,12 +109,18 @@ beforeEach(() => {
   harness.getRun.mockReset();
   harness.listExperiments.mockReset();
   harness.listExperiments.mockResolvedValue([experiment()]);
+  harness.listEvaluators.mockReset().mockResolvedValue([]);
+  harness.deleteRun.mockReset().mockResolvedValue(true);
+  harness.confirm.mockReset().mockReturnValue(true);
   Object.assign(window, {
+    confirm: harness.confirm,
     sessionSearch: {
       automation: {
         listEvaluationRuns: harness.listRuns,
         getEvaluationRun: harness.getRun,
+        deleteEvaluationRun: harness.deleteRun,
         listEvaluationExperiments: harness.listExperiments,
+        listEvaluationEvaluators: harness.listEvaluators,
       },
     },
   });
@@ -131,6 +141,67 @@ async function render(): Promise<void> {
 }
 
 describe("EvalRunsPage", () => {
+  it("groups each task's runs under an independently collapsible heading", async () => {
+    harness.listExperiments.mockResolvedValue([
+      experiment(),
+      experiment({ id: "experiment-2", name: "Writing regression" }),
+      experiment({ id: "experiment-3", name: "Empty task" }),
+    ]);
+    harness.listRuns.mockImplementation((input: { experimentId?: string }) => {
+      if (input.experimentId === "experiment-1") {
+        return Promise.resolve({
+          items: [
+            summary({ id: "run-2", startedAt: 30 }),
+            summary({ id: "run-1", startedAt: 20 }),
+          ],
+          total: 2,
+          offset: 0,
+          limit: 50,
+        });
+      }
+      if (input.experimentId === "experiment-2") {
+        return Promise.resolve({
+          items: [summary({ id: "run-3", experimentId: "experiment-2", startedAt: 10 })],
+          total: 1,
+          offset: 0,
+          limit: 50,
+        });
+      }
+      return Promise.resolve({ items: [], total: 0, offset: 0, limit: 50 });
+    });
+    harness.getRun.mockResolvedValue(graphRun());
+
+    await render();
+
+    expect(harness.listRuns.mock.calls.map(([input]) => input.experimentId)).toEqual([
+      "experiment-1",
+      "experiment-2",
+      "experiment-3",
+    ]);
+    const login = container.querySelector('[data-eval-task-id="experiment-1"]')!;
+    const writing = container.querySelector('[data-eval-task-id="experiment-2"]')!;
+    const empty = container.querySelector('[data-eval-task-id="experiment-3"]')!;
+    expect(login.querySelector(".eval-run-task-toggle")?.getAttribute("aria-expanded")).toBe("true");
+    expect(writing.querySelector(".eval-run-task-toggle")?.getAttribute("aria-expanded")).toBe("false");
+    expect(login.textContent).toContain("2 次");
+    expect(empty.textContent).toContain("0 次");
+    expect(container.querySelector('[data-eval-run-id="run-2"]')).not.toBeNull();
+    expect(container.querySelector('[data-eval-run-id="run-3"]')).toBeNull();
+
+    await act(async () => {
+      (writing.querySelector(".eval-run-task-toggle") as HTMLButtonElement).click();
+      (empty.querySelector(".eval-run-task-toggle") as HTMLButtonElement).click();
+    });
+    expect(container.querySelector('[data-eval-run-id="run-3"]')).not.toBeNull();
+    expect(empty.textContent).toContain("还没有运行记录");
+
+    await act(async () => {
+      (login.querySelector(".eval-run-task-toggle") as HTMLButtonElement).click();
+    });
+    expect(container.querySelector('[data-eval-run-id="run-2"]')).toBeNull();
+    expect(writing.querySelector(".eval-run-task-toggle")?.getAttribute("aria-expanded")).toBe("true");
+  });
+
   it("shows each step of the selected run with the reason it produced nothing", async () => {
     harness.listRuns.mockResolvedValue({ items: [summary()], total: 1, offset: 0, limit: 50 });
     harness.getRun.mockResolvedValue(graphRun());
@@ -181,6 +252,28 @@ describe("EvalRunsPage", () => {
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("database is not ready");
   });
   it("shows the score broken down by dimension, not one opaque number", async () => {
+    harness.listEvaluators.mockResolvedValue([
+      {
+        id: "correct",
+        name: "事实检查",
+        kind: "llm_judge",
+        threshold: 0.75,
+        enabled: true,
+        dimension: "正确性",
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      {
+        id: "brief",
+        name: "简洁检查",
+        kind: "llm_judge",
+        threshold: 0.75,
+        enabled: true,
+        dimension: "简洁性",
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
     harness.listRuns.mockResolvedValue({ items: [summary()], total: 1, offset: 0, limit: 50 });
     harness.getRun.mockResolvedValue({
       ...graphRun(),
@@ -199,6 +292,27 @@ describe("EvalRunsPage", () => {
           { dimension: "正确性", score: 0.9, weight: 4, decided: 1, undecided: 0, met: 1, unmet: 0 },
           { dimension: "简洁性", score: 0.4, weight: 1, decided: 1, undecided: 1, met: 0, unmet: 1 },
         ],
+        scores: [
+          {
+            evaluatorId: "correct",
+            dimension: "正确性",
+            score: 0.9,
+            passed: true,
+            reason: "关键事实与材料一致",
+            evidence: ["引用了事务提交点"],
+            durationMs: 1,
+          },
+          {
+            evaluatorId: "brief",
+            dimension: "简洁性",
+            score: 0.4,
+            passed: false,
+            reason: "重复解释了同一段背景",
+            evidence: ["第二、三段含义重复"],
+            failedCriteria: ["删除不影响理解的重复内容"],
+            durationMs: 1,
+          },
+        ],
         byLabel: { dimension: { 正确性: 0.9, 简洁性: 0.4 } },
         skippedEvaluatorIds: ["tool-failures"],
       }],
@@ -215,6 +329,49 @@ describe("EvalRunsPage", () => {
     // like a check that passed.
     expect(text).toContain("不适用于该产物来源");
     expect(text).toContain("tool-failures");
+
+    const conciseCard = [...container.querySelectorAll("button.eval-dimension-card")]
+      .find((item) => item.textContent?.includes("简洁性")) as HTMLButtonElement;
+    expect(conciseCard.textContent).toContain("点击查看原因");
+    await act(async () => {
+      conciseCard.click();
+    });
+
+    const diagnosis = container.querySelector(".eval-dimension-diagnostics")!;
+    expect(conciseCard.getAttribute("aria-pressed")).toBe("true");
+    expect(diagnosis.textContent).toContain("简洁检查");
+    expect(diagnosis.textContent).toContain("重复解释了同一段背景");
+    expect(diagnosis.textContent).toContain("删除不影响理解的重复内容");
+    expect(diagnosis.textContent).toContain("第二、三段含义重复");
+  });
+
+  it("explains an undecided dimension from the stored run and node reason", async () => {
+    harness.listRuns.mockResolvedValue({ items: [summary()], total: 1, offset: 0, limit: 50 });
+    harness.getRun.mockResolvedValue({
+      ...graphRun(),
+      dimensions: [{ dimension: "正确性", score: null, weight: 1, scoredCaseCount: 0 }],
+      results: [{
+        ...graphRun().results[0]!,
+        dimensions: [{
+          dimension: "正确性",
+          score: null,
+          weight: 1,
+          decided: 0,
+          undecided: 1,
+          met: 0,
+          unmet: 0,
+        }],
+      }],
+    } satisfies EvaluationRun);
+
+    await render();
+    await act(async () => {
+      (container.querySelector("button.eval-dimension-card") as HTMLButtonElement).click();
+    });
+
+    const diagnosis = container.querySelector(".eval-dimension-diagnostics")!;
+    expect(diagnosis.textContent).toContain("这个维度没有得出分数");
+    expect(diagnosis.textContent).toContain("评判器未配置 Runtime 通道");
   });
 
   it("calls a case passed on its weighted score, not on every check passing", async () => {
@@ -239,5 +396,71 @@ describe("EvalRunsPage", () => {
 
     expect(container.querySelector(".eval-graph-case header .eval-badge")?.textContent)
       .toBe("通过");
+  });
+});
+
+describe("EvalRunsPage deletion", () => {
+  function deleteButton(): HTMLButtonElement {
+    const found = [...container.querySelectorAll("button")]
+      .find((item) => item.getAttribute("aria-label") === "删除运行");
+    if (!found) throw new Error("delete button was not rendered");
+    return found as HTMLButtonElement;
+  }
+
+  it("deletes a run and says what goes with it", async () => {
+    harness.listRuns.mockResolvedValue({ items: [summary()], total: 1, offset: 0, limit: 50 });
+    harness.getRun.mockResolvedValue(graphRun());
+    await render();
+
+    await act(async () => {
+      deleteButton().click();
+    });
+
+    expect(harness.confirm.mock.calls[0]![0]).toContain("逐用例记录会一起删除");
+    expect(harness.deleteRun).toHaveBeenCalledWith("run-1");
+  });
+
+  it("keeps the run when the confirmation is declined", async () => {
+    harness.confirm.mockReturnValue(false);
+    harness.listRuns.mockResolvedValue({ items: [summary()], total: 1, offset: 0, limit: 50 });
+    harness.getRun.mockResolvedValue(graphRun());
+    await render();
+
+    await act(async () => {
+      deleteButton().click();
+    });
+
+    expect(harness.deleteRun).not.toHaveBeenCalled();
+  });
+
+  it("stops asking for a run it just deleted", async () => {
+    harness.listRuns
+      .mockResolvedValueOnce({ items: [summary()], total: 1, offset: 0, limit: 50 })
+      .mockResolvedValue({ items: [], total: 0, offset: 0, limit: 50 });
+    harness.getRun.mockResolvedValue(graphRun());
+    await render();
+    const before = harness.getRun.mock.calls.length;
+
+    await act(async () => {
+      deleteButton().click();
+    });
+
+    // Selection cleared, so the detail pane does not fetch a row that is gone.
+    expect(harness.getRun.mock.calls.length).toBe(before);
+    expect(container.textContent).toContain("选择一次运行");
+  });
+
+  it("reports a failed deletion instead of looking like it worked", async () => {
+    harness.deleteRun.mockRejectedValue(new Error("run is still being written"));
+    harness.listRuns.mockResolvedValue({ items: [summary()], total: 1, offset: 0, limit: 50 });
+    harness.getRun.mockResolvedValue(graphRun());
+    await render();
+
+    await act(async () => {
+      deleteButton().click();
+    });
+
+    expect(container.querySelector('[role="alert"]')?.textContent)
+      .toContain("run is still being written");
   });
 });

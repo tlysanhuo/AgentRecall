@@ -44,18 +44,47 @@ export interface EvaluationInstructionsValue {
   skill?: EvaluationSkillInjection;
 }
 
+/**
+ * One file the artifact consists of.
+ *
+ * `status` is relative to the state before the work: a fresh run reports what its
+ * tool calls did to each path, a folder artifact reports every file as `added`
+ * because there is no before-state to compare against.
+ */
 export interface EvaluationArtifactFile {
   path: string;
   status: "added" | "modified" | "deleted";
 }
 
-/** What was produced: the answer, and any files that came with it. */
+/**
+ * What a run produced. This is the whole of it.
+ *
+ * Every judge reads this shape and every run stores it, so it is the contract
+ * between "the agent did something" and "here is what it is worth". The three
+ * origins produce the same shape with different parts filled in, and a judge is
+ * entitled to rely on that:
+ *
+ * | origin      | `output`                   | `files`                        |
+ * |-------------|----------------------------|--------------------------------|
+ * | `agent_run` | the agent's final answer   | paths its tool calls touched   |
+ * | `session`   | the session's last answer  | paths its tool calls touched   |
+ * | `folder`    | `output.md` when present   | every file under the folder    |
+ *
+ * `output` is always a string — empty rather than absent, so a judge never has to
+ * distinguish "no answer" from "no artifact". `files` is optional and means "not
+ * observed", which is not the same as "nothing was touched": a runtime whose
+ * trace carries no tool arguments cannot report paths, and a judge that treats an
+ * absent list as an empty one would fail the run for AgentRecall's blind spot.
+ */
 export interface EvaluationArtifactValue {
   output: string;
   files?: EvaluationArtifactFile[];
   origin: {
     kind: "agent_run" | "session" | "folder";
-    /** Session key, folder path, or nothing for a fresh run. */
+    /**
+     * Where it lives: a folder path, or the session key — which a fresh run also
+     * gains once the session-link step has found the session it produced.
+     */
     reference?: string;
   };
   durationMs?: number;
@@ -162,6 +191,15 @@ export interface EvaluationNodeDependencies {
   readFolderArtifact?: (
     path: string,
   ) => Promise<{ output: string; files?: EvaluationArtifactFile[] } | null>;
+  /**
+   * Which files a session's tool calls touched.
+   *
+   * Separate from `readSessionArtifact` because a fresh run needs it at a
+   * different moment: the artifact is produced before the session that recorded
+   * it has been found, so the files can only be attached once the session link
+   * step has run.
+   */
+  readArtifactFiles?: (sessionKey: string) => Promise<EvaluationArtifactFile[] | null>;
   /**
    * Runs a judge the user wrote. Any failure of the script itself — a throw, a
    * timeout, output that is not a verdict — must reject, so the judge is excused

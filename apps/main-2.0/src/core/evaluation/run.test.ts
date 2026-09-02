@@ -211,6 +211,70 @@ describe("evaluation run", () => {
     });
   });
 
+  it("completes a fresh run's artifact with the files its session shows", async () => {
+    // The answer is produced before the session that recorded it has been found,
+    // so the files can only be attached afterwards — and a judge asking "did it
+    // write the file" has nothing to read until they are.
+    const outcome = await executeEvaluationRun(
+      plan({ linkTrajectory: true }),
+      dependencies({
+        runAgent: async () => ({
+          output: "4",
+          durationMs: 5,
+          executionReference: { sessionId: "thread-9" },
+        }),
+        resolveSession: async (rawId) => ({ sessionKey: `claude:${rawId}` }),
+        readTrajectory: async () => trajectory(),
+        readArtifactFiles: async () => [{ path: "src/a.ts", status: "added" }],
+      }),
+    );
+
+    expect(outcome.cases[0]!.artifact).toEqual({
+      output: "4",
+      durationMs: 5,
+      files: [{ path: "src/a.ts", status: "added" }],
+      // A linked run does live somewhere, and saying where is what lets anyone
+      // verifying a score open the session behind it.
+      origin: { kind: "agent_run", reference: "claude:thread-9" },
+    });
+  });
+
+  it("keeps the answer when the file reader fails", async () => {
+    // Files are an observation; losing one must not cost the case its artifact.
+    const outcome = await executeEvaluationRun(
+      plan({ linkTrajectory: true }),
+      dependencies({
+        runAgent: async () => ({
+          output: "4",
+          durationMs: 5,
+          executionReference: { sessionId: "thread-9" },
+        }),
+        resolveSession: async (rawId) => ({ sessionKey: `claude:${rawId}` }),
+        readTrajectory: async () => trajectory(),
+        readArtifactFiles: async () => {
+          throw new Error("trace unavailable");
+        },
+      }),
+    );
+
+    expect(outcome.cases[0]!.artifact?.output).toBe("4");
+    expect(outcome.cases[0]!.artifact?.files).toBeUndefined();
+    expect(outcome.cases[0]!.score.score).toBe(1);
+  });
+
+  it("leaves an unlinked run's artifact pointing nowhere rather than guessing", async () => {
+    const outcome = await executeEvaluationRun(
+      plan(),
+      dependencies({ readArtifactFiles: async () => [{ path: "src/a.ts", status: "added" }] }),
+    );
+
+    expect(outcome.cases[0]!.artifact).toEqual({
+      output: "4",
+      durationMs: 10,
+      origin: { kind: "agent_run" },
+    });
+  });
+
   it("keeps the output judge deciding when the session never gets indexed", async () => {
     const outcome = await executeEvaluationRun(
       plan({ linkTrajectory: true, sessionLink: { attempts: 2, delayMs: 0 } }),

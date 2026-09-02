@@ -1209,6 +1209,25 @@
 .workflow-core-template-badge { display: inline-flex; align-items: center; gap: 5px; padding: 4px 7px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); font-size: 9px; font-weight: 650; }
 .workflow-core-banner { display: flex; min-height: 32px; flex: 0 0 auto; align-items: center; gap: 10px; padding: 6px 12px; border-bottom: 1px solid color-mix(in srgb, var(--warning) 30%, var(--border)); background: color-mix(in srgb, var(--warning) 8%, transparent); color: var(--text); font-size: 11px; }
 .workflow-core-banner.is-error { border-color: color-mix(in srgb, var(--danger) 35%, var(--border)); background: color-mix(in srgb, var(--danger) 8%, transparent); color: var(--danger); }
+.workflow-core-run-history { display: grid; min-width: 0; min-height: 58px; flex: 0 0 auto; grid-template-columns: auto minmax(0, 1fr); align-items: stretch; border-bottom: 1px solid var(--border-subtle); background: var(--panel-bg); }
+.workflow-core-run-history > header { display: flex; width: 104px; align-items: center; gap: 5px; padding: 0 12px; border-right: 1px solid var(--border-subtle); color: var(--text-muted); }
+.workflow-core-run-history > header strong { font-size: 10px; white-space: nowrap; }
+.workflow-core-run-history > header span { display: grid; min-width: 16px; height: 16px; place-items: center; border-radius: 999px; background: var(--panel-active); color: var(--text-faint); font-size: 9px; }
+.workflow-core-run-history > p { align-self: center; margin: 0; padding: 0 12px; color: var(--text-faint); font-size: 10px; }
+.workflow-core-run-history-list { display: flex; min-width: 0; gap: 5px; padding: 6px 8px; overflow-x: auto; }
+.workflow-core-run-history-item { display: grid; min-width: 158px; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; padding: 6px 8px; border: 1px solid var(--border-subtle); border-radius: 7px; background: var(--panel-subtle); color: var(--text); text-align: left; }
+.workflow-core-run-history-item:hover { border-color: var(--border); background: var(--panel-hover); }
+.workflow-core-run-history-item.is-selected { border-color: color-mix(in srgb, var(--accent) 48%, var(--border)); background: var(--accent-soft); box-shadow: inset 2px 0 var(--accent); }
+.workflow-core-run-history-state { display: inline-flex; min-width: 0; align-items: center; gap: 5px; font-size: 10px; font-weight: 650; }
+.workflow-core-run-history-state i { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--text-faint); }
+.workflow-core-run-history-item.is-running .workflow-core-run-history-state i { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent); }
+.workflow-core-run-history-item.is-paused .workflow-core-run-history-state i,
+.workflow-core-run-history-item.is-waiting .workflow-core-run-history-state i { background: var(--warning); }
+.workflow-core-run-history-item.is-completed .workflow-core-run-history-state i { background: var(--success-text); }
+.workflow-core-run-history-item.is-failed .workflow-core-run-history-state i,
+.workflow-core-run-history-item.is-cancelled .workflow-core-run-history-state i { background: var(--danger); }
+.workflow-core-run-history-item time { color: var(--text-faint); font: 9px var(--font-mono); white-space: nowrap; }
+.workflow-core-run-history-item small { grid-column: 1 / -1; color: var(--text-muted); font-size: 9px; }
 .workflow-core-run-statusbar { display: grid; min-height: 37px; flex: 0 0 auto; grid-template-columns: auto auto minmax(90px, 1fr) minmax(100px, 180px) auto; align-items: center; gap: 8px; padding: 0 13px; border-bottom: 1px solid var(--border-subtle); background: color-mix(in srgb, var(--panel-subtle) 58%, var(--panel-bg)); color: var(--text-dim); font-size: 10px; }
 .workflow-core-run-pulse { display: grid; width: 20px; height: 20px; place-items: center; color: var(--accent); }
 .workflow-core-run-statusbar.is-running .workflow-core-run-pulse { animation: workflow-core-pulse 1.8s ease-in-out infinite; }
@@ -1431,6 +1450,8 @@
 @media (max-width: 1050px) {
   .workflow-core-shell { grid-template-columns: 168px minmax(0, 1fr); }
   .workflow-core-title { display: none; }
+  .workflow-core-run-history { grid-template-columns: minmax(0, 1fr); }
+  .workflow-core-run-history > header { display: none; }
   .workflow-core-inspector { width: min(350px, calc(100% - 24px)); }
   .workflow-core-run-statusbar { grid-template-columns: auto auto minmax(70px, 1fr) auto; }
   .workflow-core-run-progress { display: none; }

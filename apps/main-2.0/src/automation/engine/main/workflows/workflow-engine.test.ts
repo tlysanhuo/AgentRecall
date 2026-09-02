@@ -245,6 +245,41 @@ describe("WorkflowEngine", () => {
     expect(seen).toEqual(["/workflow-project", "/global-project"]);
   });
 
+  test("rejects required Workflow inputs that are present but carry no value", async () => {
+    const store = new MemoryStore();
+    const runtime = engine(store, executor(async () => ({ value: "done" })));
+    const withRequiredTopic = {
+      ...definition([agent("answer")]),
+      inputs: [{ key: "topic", name: "Topic", description: "What to research", type: "text" as const, required: true }],
+    };
+
+    for (const value of [undefined, null, "", "   "]) {
+      await expect(runtime.start(withRequiredTopic, { topic: value })).rejects.toThrow("Required Workflow input topic is missing.");
+    }
+    await expect(runtime.start(withRequiredTopic, {})).rejects.toThrow("Required Workflow input topic is missing.");
+    expect(store.runs.size).toBe(0);
+
+    const accepted = await runtime.start(withRequiredTopic, { topic: "coding agents" });
+    await waitForRun(store, accepted.id, "completed");
+  });
+
+  test("keeps falsy-but-real required input values, and still allows blank optional inputs", async () => {
+    const store = new MemoryStore();
+    const runtime = engine(store, executor(async () => ({ value: "done" })));
+    const withMixedInputs = {
+      ...definition([agent("answer")]),
+      inputs: [
+        { key: "attempts", name: "Attempts", description: "How many", type: "number" as const, required: true },
+        { key: "enabled", name: "Enabled", description: "On or off", type: "boolean" as const, required: true },
+        { key: "note", name: "Note", description: "Optional note", type: "text" as const, required: false },
+      ],
+    };
+
+    const started = await runtime.start(withMixedInputs, { attempts: 0, enabled: false, note: "" });
+    await waitForRun(store, started.id, "completed");
+    expect(started.inputs).toEqual({ attempts: 0, enabled: false, note: "" });
+  });
+
   test("pauses an active node, records lifecycle events, and resumes it in the background", async () => {
     const store = new MemoryStore();
     let calls = 0;

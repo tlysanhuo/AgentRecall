@@ -348,20 +348,56 @@ export function hydrateEvaluationCaseSpec(
   };
 }
 
+/**
+ * True when a saved graph carries only its judging half.
+ *
+ * The head of a graph — the case, the injected skill, the run, the session it
+ * produced — is not something a user assembles: it follows from the Runtime, the
+ * Skill and the dataset the graph is configured with. A graph saved without a task
+ * step is one of those, and its head is derived rather than read back.
+ *
+ * Graphs authored before that, which stored every step, are detected here and
+ * still run exactly as they were stored.
+ */
+export function isJudgingOnlySpec(spec: EvaluationGraphSpec): boolean {
+  return !spec.nodes.some((node) => node.type === TASK_SOURCE_NODE_TYPE);
+}
+
+/** The head the graph is configured with, plus whichever judges it saved. */
+function judgingOnlyOrHydrated(
+  plan: EvaluationCasePlan,
+  saved: EvaluationGraphSpec,
+): EvaluationCaseSpecResult {
+  if (!isJudgingOnlySpec(saved)) {
+    return {
+      spec: hydrateEvaluationCaseSpec(saved, {
+        task: plan.task,
+        agentId: plan.agentId,
+        skillName: plan.skillName,
+        evaluators: plan.evaluators,
+      }),
+      skippedEvaluatorIds: [],
+    };
+  }
+  const head = buildEvaluationCaseSpec({ ...plan, evaluators: [] });
+  const judges = hydrateEvaluationCaseSpec(saved, {
+    task: plan.task,
+    agentId: plan.agentId,
+    skillName: plan.skillName,
+    evaluators: plan.evaluators,
+  });
+  return {
+    spec: { ...head.spec, nodes: [...head.spec.nodes, ...judges.nodes] },
+    skippedEvaluatorIds: head.skippedEvaluatorIds,
+  };
+}
+
 export function buildEvaluationCaseGraph(
   plan: EvaluationCasePlan,
   dependencies: EvaluationNodeDependencies,
 ): { graph: BuiltEvaluationGraph; skippedEvaluatorIds: string[] } {
   const built = plan.savedSpec
-    ? {
-        spec: hydrateEvaluationCaseSpec(plan.savedSpec, {
-          task: plan.task,
-          agentId: plan.agentId,
-          skillName: plan.skillName,
-          evaluators: plan.evaluators,
-        }),
-        skippedEvaluatorIds: [],
-      }
+    ? judgingOnlyOrHydrated(plan, plan.savedSpec)
     : buildEvaluationCaseSpec(plan);
   return {
     graph: buildEvaluationGraph(

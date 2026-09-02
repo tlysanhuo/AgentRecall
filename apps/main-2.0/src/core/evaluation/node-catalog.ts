@@ -31,6 +31,8 @@ import {
 export type EvaluationConfigFieldKind =
   /** One of the configured execution Agents. */
   | "agent"
+  /** One of the stored datasets, or a folder of cases picked from disk. */
+  | "dataset"
   /** An installed skill name, or empty for "inject nothing". */
   | "skill"
   /** One of the saved evaluators; also fills kind, threshold, prompt and runtime. */

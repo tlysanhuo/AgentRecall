@@ -10,12 +10,14 @@ interface BundledSkillMetadata {
 const BUNDLED_SKILL_ORDER = [
   "brainstorming",
   "frontend-design",
+  "feishu-tech-diagram",
   "handoff",
   "skill-creator",
   "systematic-debugging",
   "personal-finance-planning",
   "resume-optimization",
   "paper-writing",
+  "rewrite-technical-tutorial",
   "refactor-review-knowledge",
   "code-review-and-quality",
 ];

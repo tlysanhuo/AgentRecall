@@ -13,7 +13,11 @@ type FakeBuiltin = {
   testEnv: () => Record<string, string>;
 };
 
-function setup(pickDirectory?: (defaultPath?: string) => Promise<string | undefined>, builtins?: FakeBuiltin[]) {
+function setup(
+  pickDirectory?: (defaultPath?: string) => Promise<string | undefined>,
+  builtins?: FakeBuiltin[],
+  openEvaluationArtifact?: (request: { runId: string; resultId: string }) => Promise<string>,
+) {
   const handlers = new Map<string, (...args: any[]) => unknown>();
   let workflowRunStreamListener: ((event: unknown) => void) | undefined;
   const unsubscribeWorkflowRunStream = vi.fn();
@@ -121,7 +125,13 @@ function setup(pickDirectory?: (defaultPath?: string) => Promise<string | undefi
     },
     resolveRuntimeApproval: vi.fn(),
   } as unknown as NativeAutomationService;
-  const dispose = registerAutomationIpc({ ipc: ipc as never, service, send, pickDirectory });
+  const dispose = registerAutomationIpc({
+    ipc: ipc as never,
+    service,
+    send,
+    pickDirectory,
+    openEvaluationArtifact,
+  });
   const invoke = (channel: string, ...args: unknown[]) => handlers.get(channel)?.({}, ...args);
   return {
     handlers,
@@ -140,6 +150,21 @@ function setup(pickDirectory?: (defaultPath?: string) => Promise<string | undefi
 }
 
 describe("registerAutomationIpc", () => {
+  it("validates and opens one concrete evaluation artifact", async () => {
+    const openEvaluationArtifact = vi.fn(async () => "/data/evaluation-artifacts/result.md");
+    const { invoke } = setup(undefined, undefined, openEvaluationArtifact);
+
+    await expect(invoke(AUTOMATION_CHANNELS.evaluationArtifactOpen, {
+      runId: "run-1",
+      resultId: "result-1",
+    })).resolves.toBe("/data/evaluation-artifacts/result.md");
+    expect(openEvaluationArtifact).toHaveBeenCalledWith({ runId: "run-1", resultId: "result-1" });
+    await expect(invoke(AUTOMATION_CHANNELS.evaluationArtifactOpen, {
+      runId: "../run",
+      resultId: "",
+    })).rejects.toThrow();
+  });
+
   it("forwards ephemeral Workflow Runtime output and unsubscribes on cleanup", () => {
     const { send, dispose, emitWorkflowRunStream, unsubscribeWorkflowRunStream } = setup();
     const event = {

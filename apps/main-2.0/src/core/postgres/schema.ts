@@ -1784,4 +1784,30 @@ export const POSTGRES_MIGRATIONS: readonly PostgresMigration[] = [{
         ADD COLUMN IF NOT EXISTS dimensions jsonb;
     `,
   ],
+}, {
+  version: 45,
+  name: "store what a case run produced, not only its answer text",
+  statements: [
+    `
+      ALTER TABLE agent_recall.evaluation_case_results
+        ADD COLUMN IF NOT EXISTS artifact_origin_kind text,
+        ADD COLUMN IF NOT EXISTS artifact_origin_reference text,
+        ADD COLUMN IF NOT EXISTS artifact_files jsonb;
+    `,
+  ],
+}, {
+  version: 46,
+  name: "store every dimension returned by one evaluation judge",
+  statements: [
+    `
+      UPDATE agent_recall.evaluation_scores
+         SET dimension = evaluator_id
+       WHERE dimension IS NULL;
+
+      ALTER TABLE agent_recall.evaluation_scores
+        ALTER COLUMN dimension SET NOT NULL,
+        DROP CONSTRAINT evaluation_scores_pkey,
+        ADD PRIMARY KEY (case_result_id, evaluator_id, dimension);
+    `,
+  ],
 }];

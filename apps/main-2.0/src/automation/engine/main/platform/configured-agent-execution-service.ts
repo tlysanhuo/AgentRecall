@@ -34,7 +34,18 @@ export class ConfiguredAgentExecutionService {
   }) {}
 
   async runOneShot(
-    input: { configuredAgentId: string; prompt: string; workDir?: string; developerInstructions?: string },
+    input: {
+      configuredAgentId: string;
+      prompt: string;
+      workDir?: string;
+      developerInstructions?: string;
+      workflowExecution?: {
+        workflowId: string;
+        runId: string;
+        nodeId: string;
+        executionId: string;
+      };
+    },
     onEvent?: (event: WorkflowAgentEvent) => void,
     signal?: AbortSignal,
   ): Promise<{
@@ -80,6 +91,12 @@ export class ConfiguredAgentExecutionService {
       runtimeConversation?: RuntimeConversation;
       developerInstructions?: string;
       agentRecallMcp?: AgentRecallMcpContext;
+      workflowExecution?: {
+        workflowId: string;
+        runId: string;
+        nodeId: string;
+        executionId: string;
+      };
     },
     allowContinuation: boolean,
     onEvent?: (event: WorkflowAgentEvent) => void,
@@ -111,6 +128,12 @@ export class ConfiguredAgentExecutionService {
         ? { developerInstructions: input.developerInstructions.trim() }
         : {}),
       ...(input.agentRecallMcp ? { agentRecallMcp: { ...input.agentRecallMcp } } : {}),
+      ...(input.workflowExecution ? {
+        planningWorkflowId: input.workflowExecution.workflowId,
+        workflowRunId: input.workflowExecution.runId,
+        workflowNodeId: input.workflowExecution.nodeId,
+        workflowNodeExecutionId: input.workflowExecution.executionId,
+      } : {}),
       workDir: input.workDir ?? this.dependencies.defaultWorkDir(),
     };
     const response = onEvent || signal

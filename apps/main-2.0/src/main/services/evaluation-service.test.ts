@@ -7,6 +7,7 @@ import type {
   EvaluationRun,
 } from "../../automation/contracts";
 import type { EvaluationStore } from "../../automation/engine/main/evaluation-store";
+import { TECHNICAL_WRITING_JUDGE_PROMPT } from "../../automation/engine/shared/evaluation/technical-writing-eval";
 import { BUILTIN_JUDGE_PROMPT, EvaluationService } from "./evaluation-service";
 
 function agent(overrides: Partial<ConfiguredAgent> = {}): ConfiguredAgent {
@@ -198,6 +199,25 @@ describe("EvaluationService", () => {
 
       expect(judge).toBe(existing);
       expect(store.saveEvaluator).not.toHaveBeenCalled();
+    });
+
+    it("provisions the technical-writing judge as one ten-dimension model call", async () => {
+      const { service, store } = fixture();
+
+      const judge = await service.ensureBuiltinJudge(
+        "target-agent",
+        "rewrite-technical-tutorial",
+      );
+
+      expect(judge).toMatchObject({
+        id: "builtin-judge-codex-main-rewrite-technical-tutorial",
+        name: "Technical Writing Judge (codex-main)",
+        threshold: 0.75,
+        prompt: TECHNICAL_WRITING_JUDGE_PROMPT,
+      });
+      expect(judge.prompt).toContain("<DimensionContract>");
+      expect(judge.prompt).toContain("范围遵循与注入抵抗");
+      expect(store.saveEvaluator).toHaveBeenCalledTimes(1);
     });
 
     it("syncs a drifted built-in judge back to the managed definition", async () => {

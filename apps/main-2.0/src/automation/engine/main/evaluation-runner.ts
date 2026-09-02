@@ -75,6 +75,8 @@ export interface RunEvaluationInput {
   readFolderArtifact?: (
     path: string,
   ) => Promise<{ output: string; files?: EvaluationArtifactFile[] } | null>;
+  /** Which files a session's tool calls touched, for a fresh run's artifact. */
+  readArtifactFiles?: (sessionKey: string) => Promise<EvaluationArtifactFile[] | null>;
   /** Runs a judge the user wrote. Absent means script judges excuse themselves. */
   runJudgeScript?: EvaluationNodeDependencies["runJudgeScript"];
   wait?: (milliseconds: number) => Promise<void>;
@@ -126,6 +128,7 @@ export async function runEvaluation(input: RunEvaluationInput): Promise<Evaluati
     ...(input.readTrajectory ? { readTrajectory: input.readTrajectory } : {}),
     ...(input.readSessionArtifact ? { readSessionArtifact: input.readSessionArtifact } : {}),
     ...(input.readFolderArtifact ? { readFolderArtifact: input.readFolderArtifact } : {}),
+    ...(input.readArtifactFiles ? { readArtifactFiles: input.readArtifactFiles } : {}),
     ...(input.runJudgeScript ? { runJudgeScript: input.runJudgeScript } : {}),
     ...(input.wait ? { wait: input.wait } : {}),
   };
@@ -296,6 +299,17 @@ function caseResult(runId: string, outcome: EvaluationCaseOutcome): EvaluationCa
       ? { expectedOutput: outcome.task.expectedOutput }
       : {}),
     output: outcome.output,
+    // Everything else the artifact is. Stored so a recorded run stays
+    // re-readable: a judge written next week can be pointed at these files
+    // without running the agent again.
+    ...(outcome.artifact
+      ? {
+          artifact: {
+            origin: outcome.artifact.origin,
+            ...(outcome.artifact.files ? { files: outcome.artifact.files } : {}),
+          },
+        }
+      : {}),
     // The legacy `error` field is what older clients read to spot a case that
     // did not evaluate; keep it in step with the graph's own reason.
     ...(outcome.unscoredReason ? { error: outcome.unscoredReason } : {}),

@@ -21,6 +21,11 @@ import type {
   EvaluationArtifactFile,
   EvaluationTrajectoryValue,
 } from "../../core/evaluation/nodes/contracts";
+import {
+  isTechnicalWritingSkill,
+  TECHNICAL_WRITING_JUDGE_PROMPT,
+  TECHNICAL_WRITING_SKILL_ID,
+} from "../../automation/engine/shared/evaluation/technical-writing-eval";
 
 export type EvaluationAgentExecution = (
   input: {
@@ -85,6 +90,12 @@ export interface EvaluationServiceDependencies {
   readFolderArtifact?: (
     path: string,
   ) => Promise<{ output: string; files?: EvaluationArtifactFile[] } | null>;
+  /**
+   * Which files a session's tool calls touched, so a fresh run's artifact is more
+   * than its final message. Read after the session link, which is the first
+   * moment the session is known.
+   */
+  readArtifactFiles?: (sessionKey: string) => Promise<EvaluationArtifactFile[] | null>;
   /**
    * Runs a judge the user wrote as code. Without it a script evaluator excuses
    * itself, which keeps it visible in the report instead of scoring zero.
@@ -184,19 +195,31 @@ export class EvaluationService {
   // configure a separate judge runtime first. The judge is code-managed: one
   // per channel, and a persisted definition that drifted from the code (e.g.
   // an older rubric) is synced back on the next call.
-  async ensureBuiltinJudge(configuredAgentId: string): Promise<EvaluationEvaluator> {
+  async ensureBuiltinJudge(
+    configuredAgentId: string,
+    skillName?: string,
+  ): Promise<EvaluationEvaluator> {
     const agent = this.dependencies.agents().find((item) => item.id === configuredAgentId);
     if (!agent) throw new Error(`Evaluation Agent not found: ${configuredAgentId}`);
-    const id = `builtin-judge-${agent.channelId}`;
-    const name = `Built-in Judge (${agent.channelId})`;
+    const technicalWriting = isTechnicalWritingSkill(skillName ?? "");
+    const id = technicalWriting
+      ? `builtin-judge-${agent.channelId}-${TECHNICAL_WRITING_SKILL_ID}`
+      : `builtin-judge-${agent.channelId}`;
+    const name = technicalWriting
+      ? `Technical Writing Judge (${agent.channelId})`
+      : `Built-in Judge (${agent.channelId})`;
+    const prompt = technicalWriting ? TECHNICAL_WRITING_JUDGE_PROMPT : BUILTIN_JUDGE_PROMPT;
+    const threshold = technicalWriting ? 0.75 : 0.6;
     const existing = (await this.dependencies.store.listEvaluators()).find(
       (item) => item.id === id,
     );
     if (
       existing
-      && existing.prompt === BUILTIN_JUDGE_PROMPT
+      && existing.prompt === prompt
       && existing.name === name
       && existing.runtimeId === agent.channelId
+      && existing.threshold === threshold
+      && existing.enabled
     ) {
       return existing;
     }
@@ -205,9 +228,9 @@ export class EvaluationService {
       id,
       name,
       kind: "llm_judge",
-      prompt: BUILTIN_JUDGE_PROMPT,
+      prompt,
       runtimeId: agent.channelId,
-      threshold: 0.6,
+      threshold,
       enabled: true,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
@@ -342,6 +365,7 @@ export class EvaluationService {
     readTrajectory?: EvaluationServiceDependencies["readTrajectory"];
     readSessionArtifact?: EvaluationServiceDependencies["readSessionArtifact"];
     readFolderArtifact?: EvaluationServiceDependencies["readFolderArtifact"];
+    readArtifactFiles?: EvaluationServiceDependencies["readArtifactFiles"];
     runJudgeScript?: EvaluationServiceDependencies["runJudgeScript"];
     execute: EvaluationAgentExecution;
     executeJudge: (
@@ -409,6 +433,9 @@ export class EvaluationService {
         : {}),
       ...(this.dependencies.readFolderArtifact
         ? { readFolderArtifact: this.dependencies.readFolderArtifact }
+        : {}),
+      ...(this.dependencies.readArtifactFiles
+        ? { readArtifactFiles: this.dependencies.readArtifactFiles }
         : {}),
       ...(this.dependencies.runJudgeScript
         ? { runJudgeScript: this.dependencies.runJudgeScript }

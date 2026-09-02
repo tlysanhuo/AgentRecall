@@ -35,6 +35,12 @@ export interface EvaluationScoringConfig {
   minCoverage?: number;
   /** What to do with a verdict the judge could not decide. Defaults to excluding it. */
   uncertain?: "exclude" | "zero";
+  /**
+   * Label values that are hard requirements. Every configured value must be
+   * present and all matching verdicts must be met; a high soft score cannot
+   * compensate for one of these failures.
+   */
+  requiredLabels?: Record<string, string[]>;
 }
 
 export interface EvaluationDimensionScore {
@@ -131,7 +137,10 @@ export function scoreEvaluationCase(
   return {
     caseId: aggregate.caseId,
     score,
-    passed: score !== null && score >= threshold && coverageOf(verdicts, aggregate, config) >= minCoverage,
+    passed: score !== null
+      && score >= threshold
+      && coverageOf(verdicts, aggregate, config) >= minCoverage
+      && requiredLabelsPassed(verdicts, config),
     gatePassed: true,
     coverage: coverageOf(verdicts, aggregate, config),
     dimensions,
@@ -139,6 +148,19 @@ export function scoreEvaluationCase(
     decided: decided.length,
     notDecided: aggregate.completeness.notDecided,
   };
+}
+
+function requiredLabelsPassed(
+  verdicts: readonly EvaluationVerdict[],
+  config: EvaluationScoringConfig,
+): boolean {
+  for (const [key, requiredValues] of Object.entries(config.requiredLabels ?? {})) {
+    for (const requiredValue of requiredValues) {
+      const matches = verdicts.filter((verdict) => verdict.labels[key] === requiredValue);
+      if (matches.length === 0 || matches.some((verdict) => verdict.status !== "met")) return false;
+    }
+  }
+  return true;
 }
 
 export function scoreEvaluationRun(

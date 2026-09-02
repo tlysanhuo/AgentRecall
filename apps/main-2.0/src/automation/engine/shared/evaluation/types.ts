@@ -1,4 +1,8 @@
 import type { EvaluationJudgeSubject } from "../../../../core/evaluation/case-graph";
+import type {
+  EvaluationArtifactFile,
+  EvaluationArtifactValue,
+} from "../../../../core/evaluation/nodes/contracts";
 import type { EvaluationNodeRecord } from "../../../../core/evaluation/graph/node";
 import type { EvaluationGraphSpec } from "../../../../core/evaluation/graph/builder";
 import type {
@@ -13,6 +17,10 @@ export type {
   EvaluationScoringConfig,
 } from "../../../../core/evaluation/graph/scorer";
 export type { EvaluationJudgeSubject } from "../../../../core/evaluation/case-graph";
+export type {
+  EvaluationArtifactFile,
+  EvaluationArtifactValue,
+} from "../../../../core/evaluation/nodes/contracts";
 export type {
   EvaluationGraphNodeSpec,
   EvaluationGraphSpec,
@@ -151,6 +159,20 @@ export interface EvaluationScore {
   estimatedCost?: number;
 }
 
+/**
+ * What a case produced, as stored — the artifact contract minus its text.
+ *
+ * `output` and `durationMs` are columns of the case result already, so repeating
+ * them here would give one fact two homes that could disagree. Everything else a
+ * judge was handed is kept, which is what makes a recorded run re-readable: a new
+ * judge can be written against last week's files without running the agent again.
+ */
+export interface EvaluationCaseArtifact {
+  origin: EvaluationArtifactValue["origin"];
+  /** Absent means "not observed", which is not the same as "nothing touched". */
+  files?: EvaluationArtifactFile[];
+}
+
 export interface EvaluationCaseResult {
   id: string;
   runId: string;
@@ -159,6 +181,12 @@ export interface EvaluationCaseResult {
   input: string;
   expectedOutput?: string;
   output: string;
+  /**
+   * Where the answer came from and which files came with it. Absent on runs
+   * recorded before the artifact was stored, and on cases whose source failed
+   * before producing one.
+   */
+  artifact?: EvaluationCaseArtifact;
   error?: string;
   durationMs: number;
   scores: EvaluationScore[];

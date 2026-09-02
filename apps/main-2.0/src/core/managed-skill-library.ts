@@ -107,6 +107,18 @@ export const AGENT_RECALL_BUILTIN_SKILLS: AgentRecallBuiltinSkillDefinition[] = 
     categoryId: "explore",
   },
   {
+    id: "rewrite-technical-tutorial",
+    installId: "rewrite-technical-tutorial",
+    sourceUrl: "https://github.com/zszz3/AgentRecall/tree/main/apps/main-2.0/assets/bundled-skills/rewrite-technical-tutorial",
+    categoryId: "writing",
+  },
+  {
+    id: "feishu-tech-diagram",
+    installId: "feishu-tech-diagram",
+    sourceUrl: "https://github.com/zszz3/AgentRecall/tree/main/apps/main-2.0/assets/bundled-skills/feishu-tech-diagram",
+    categoryId: "writing",
+  },
+  {
     id: "dsh-code-review",
     installId: "dsh-code-review",
     sourceUrl: "https://github.com/deepseek-ai/deepseek-harness/tree/master/.agents/skills/dsh-code-review",

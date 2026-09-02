@@ -153,6 +153,43 @@ describe("coverage and passing", () => {
     expect(score.score).toBeCloseTo(0.4);
   });
 
+  it("does not let soft dimensions compensate for an unmet required label", () => {
+    const score = scoreCase([
+      judge("facts", "pass", [{
+        verdictId: "facts",
+        status: "unmet",
+        raw: 0.5,
+        labels: { dimension: "事实准确", priority: "must" },
+      }]),
+      judge("clarity", "pass", [{
+        verdictId: "clarity",
+        status: "met",
+        raw: 1,
+        labels: { dimension: "表达清晰", priority: "should" },
+      }]),
+    ], {
+      resolvedThreshold: 0.6,
+      requiredLabels: { priority: ["must"] },
+    });
+
+    expect(score.score).toBe(0.75);
+    expect(score.passed).toBe(false);
+  });
+
+  it("requires a configured hard-label verdict to be present", () => {
+    const score = scoreCase([
+      judge("clarity", "pass", [{
+        verdictId: "clarity",
+        status: "met",
+        raw: 1,
+        labels: { dimension: "表达清晰", priority: "should" },
+      }]),
+    ], { requiredLabels: { priority: ["must"] } });
+
+    expect(score.score).toBe(1);
+    expect(score.passed).toBe(false);
+  });
+
   it("counts a judge that produced nothing against coverage", () => {
     // A judge that threw would otherwise leave coverage at 1 and let a
     // four-dimension rubric report a score computed from one dimension.

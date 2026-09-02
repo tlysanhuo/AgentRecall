@@ -1,16 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ReactElement } from "react";
-import { AlertTriangle, Beaker, CheckCircle2, ChevronDown, ChevronRight, Database, EyeOff, Gauge, History, Link2Off, Lock, MousePointerClick, Pencil, Play, Plus, RefreshCw, Settings2, Trash2, Workflow, X } from "lucide-react";
+import { AlertTriangle, Beaker, CheckCircle2, ChevronDown, ChevronRight, Database, EyeOff, Gauge, History, Link2Off, MousePointerClick, Pencil, Play, Plus, RefreshCw, Settings2, Target, Trash2, X } from "lucide-react";
 
 import type { SkillTriggerLink } from "../../../../core/session-store";
 import type { SkillFinding } from "../../../../core/skill-eval-findings";
 import type { SkillEvalDetail, SkillEvalOverview, SkillEvalSuite } from "../../../../main/services/skill-service";
 import type { EvaluationEvaluator, EvaluationNodeRecord, EvaluationRun, EvaluationRunSummary, ConfiguredAgent } from "../../../../automation/contracts";
+import {
+  isTechnicalWritingSkill,
+  TECHNICAL_WRITING_DIMENSIONS,
+  TECHNICAL_WRITING_EVAL_CASES,
+} from "../../../../automation/engine/shared/evaluation/technical-writing-eval";
 import { formatRelativeTime } from "../../../../core/format-session";
 import { localize, type LanguageMode } from "../../language";
 import { EvalDatasetsPage } from "./eval-datasets-page";
 import { EvalEvaluatorsPage } from "./eval-evaluators-page";
-import { EvalGraphPage } from "./eval-graph-page";
+import { EvalPlanPage } from "./eval-plan-page";
 import { EvalRunsPage } from "./eval-runs-page";
 import {
   formatDuration,
@@ -20,6 +25,7 @@ import {
   nodeReasonText,
   nodeStatusClass,
   nodeStatusText,
+  runStatusClass,
   runStatusText,
   skillUseText,
 } from "./eval-format";
@@ -177,16 +183,10 @@ export function EvalPage({
           <Gauge size={12} /> {l("Evaluators", "评分器")}
         </button>
         <button className={tab === "graph" ? "active" : ""} onClick={() => switchTab("graph")}>
-          <Workflow size={12} /> {l("Graphs", "执行图")}
+          <Target size={12} /> {l("Plans", "方案")}
         </button>
         <button className={tab === "runs" ? "active" : ""} onClick={() => switchTab("runs")}>
           <History size={12} /> {l("Runs", "运行")}
-        </button>
-        <button disabled title={l("Coming later", "后续开放")}>
-          <Lock size={12} /> Workflows
-        </button>
-        <button disabled title={l("Coming later", "后续开放")}>
-          <Lock size={12} /> Rules
         </button>
       </nav>
 
@@ -195,7 +195,11 @@ export function EvalPage({
       ) : tab === "evaluators" ? (
         <EvalEvaluatorsPage language={language} onDirtyChange={(dirty) => reportDirty("evaluators", dirty)} />
       ) : tab === "graph" ? (
-        <EvalGraphPage language={language} />
+        <EvalPlanPage
+          language={language}
+          onDirtyChange={(dirty) => reportDirty("graph", dirty)}
+          onOpenRuns={() => switchTab("runs")}
+        />
       ) : tab === "runs" ? (
         <EvalRunsPage language={language} onOpenSession={onOpenSession} />
       ) : !enabled ? (
@@ -699,9 +703,15 @@ function CreateSuiteDialog({
   const [evaluatorIds, setEvaluatorIds] = useState<string[]>(
     editing ? editing.evaluatorIds.filter((id) => !id.startsWith("builtin-judge-")) : [],
   );
-  const [cases, setCases] = useState<Array<{ input: string; expectedOutput: string }>>([
-    { input: "", expectedOutput: "" },
-  ]);
+  const [cases, setCases] = useState<Array<{ input: string; context: string; expectedOutput: string }>>(
+    isTechnicalWritingSkill(skill)
+      ? TECHNICAL_WRITING_EVAL_CASES.map((item) => ({
+          input: item.input,
+          context: item.context,
+          expectedOutput: item.expectedOutput,
+        }))
+      : [{ input: "", context: "", expectedOutput: "" }],
+  );
   const [evaluators, setEvaluators] = useState<EvaluationEvaluator[]>([]);
   const [agents, setAgents] = useState<ConfiguredAgent[]>([]);
   const [saving, setSaving] = useState(false);
@@ -728,7 +738,11 @@ function CreateSuiteDialog({
         if (editing) {
           const savedCases = await window.sessionSearch.getSkillEvalSuiteCases(editing.id);
           if (!cancelled && savedCases.length > 0) {
-            setCases(savedCases.map((item) => ({ input: item.input, expectedOutput: item.expectedOutput ?? "" })));
+            setCases(savedCases.map((item) => ({
+              input: item.input,
+              context: item.context ?? "",
+              expectedOutput: item.expectedOutput ?? "",
+            })));
           }
         }
       } catch (cause) {
@@ -748,6 +762,7 @@ function CreateSuiteDialog({
         .filter((item) => item.input.trim())
         .map((item) => ({
           input: item.input,
+          ...(item.context.trim() ? { context: item.context } : {}),
           ...(item.expectedOutput.trim() ? { expectedOutput: item.expectedOutput } : {}),
         }));
       if (editing) {
@@ -823,13 +838,34 @@ function CreateSuiteDialog({
                 checked={useBuiltinJudge}
                 onChange={(event) => setUseBuiltinJudge(event.target.checked)}
               />
-              {l("Built-in LLM Judge (recommended)", "内置 LLM Judge（推荐）")}
+              {isTechnicalWritingSkill(skill)
+                ? l("Technical tutorial 10-dimension Judge (recommended)", "技术教程十维 Judge（推荐）")
+                : l("Built-in LLM Judge (recommended)", "内置 LLM Judge（推荐）")}
             </label>
             {useBuiltinJudge ? (
-              <p className="eval-muted">{l(
-                "Judges each case with the execution Agent's own model. No setup needed; scores may be lenient about style.",
-                "用执行 Agent 同款模型逐条评审，无需任何配置；对文风差异可能偏宽松。",
-              )}</p>
+              <>
+                <p className="eval-muted">{l(
+                  isTechnicalWritingSkill(skill)
+                    ? "One model call returns ten evidenced verdicts; must dimensions are hard requirements."
+                    : "Judges each case with the execution Agent's own model. No setup needed; scores may be lenient about style.",
+                  isTechnicalWritingSkill(skill)
+                    ? "一次模型调用返回十个带证据的维度结论；必须维度属于硬条件。"
+                    : "用执行 Agent 同款模型逐条评审，无需任何配置；对文风差异可能偏宽松。",
+                )}</p>
+                {isTechnicalWritingSkill(skill) ? (
+                  <ul className="eval-suite-dimension-contract">
+                    {TECHNICAL_WRITING_DIMENSIONS.map((dimension) => (
+                      <li key={dimension.name}>
+                        <span>{dimension.name}</span>
+                        <span className={`eval-dimension-priority is-${dimension.priority}`}>
+                          {dimension.priority === "must" ? l("must", "必须") : l("should", "应该")}
+                        </span>
+                        <small>{dimension.criterion}</small>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </>
             ) : null}
             {evaluators.map((evaluator) => {
               const checked = evaluatorIds.includes(evaluator.id);
@@ -867,7 +903,7 @@ function CreateSuiteDialog({
         <div className="eval-suite-field">
           <div className="eval-suite-cases-header">
             <span>{l("Test cases", "测试用例")}</span>
-            <button type="button" onClick={() => setCases((items) => [...items, { input: "", expectedOutput: "" }])}>
+            <button type="button" onClick={() => setCases((items) => [...items, { input: "", context: "", expectedOutput: "" }])}>
               <Plus size={12} />{l("Case", "用例")}
             </button>
           </div>
@@ -877,6 +913,11 @@ function CreateSuiteDialog({
                 value={item.input}
                 placeholder={l(`Use ${skill} to: ...`, `使用 ${skill} 处理：...`)}
                 onChange={(event) => setCases((items) => items.map((value, i) => i === index ? { ...value, input: event.target.value } : value))}
+              />
+              <textarea
+                value={item.context}
+                placeholder={l("Source material / evidence (optional)", "源码材料 / 证据（可选）")}
+                onChange={(event) => setCases((items) => items.map((value, i) => i === index ? { ...value, context: event.target.value } : value))}
               />
               <textarea
                 value={item.expectedOutput}
@@ -1103,7 +1144,7 @@ function SuiteRunsSection({
                   onClick={() => setExpandedRunId((current) => current === run.id ? null : run.id)}
                 >
                   {expandedRunId === run.id ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                  <span className={`eval-badge ${run.status === "completed" ? "eval-badge-current" : run.status === "running" || run.status === "pending" ? "eval-badge-dim" : "eval-badge-warn"}`}>
+                  <span className={`eval-badge ${runStatusClass(run.status)}`}>
                     {runStatusText(language, run.status)}
                   </span>
                   <span className="eval-muted">{formatRelativeTime(run.startedAt, language)}</span>
@@ -1228,7 +1269,7 @@ function RunCaseDetail({
           <div key={result.id} className="eval-run-case">
             <header className="eval-run-case-header">
               <span className="eval-run-case-title">{l(`Case ${index + 1}`, `用例 ${index + 1}`)}{run.results.filter((item) => item.datasetItemId === result.datasetItemId).length > 1 ? ` · #${result.repetition}` : ""}</span>
-              <span className={`eval-badge ${unscored ? "eval-badge-dim" : passed ? "eval-badge-current" : "eval-badge-warn"}`}>
+              <span className={`eval-badge ${unscored ? "eval-badge-dim" : passed ? "eval-badge-ok" : "eval-badge-warn"}`}>
                 {unscored ? l("Not scored", "未评分") : passed ? l("Passed", "通过") : l("Failed", "未通过")}
               </span>
               <span className="eval-muted">{formatDuration(result.durationMs)}</span>
@@ -1277,7 +1318,7 @@ function RunCaseDetail({
               <div key={score.evaluatorId} className="eval-run-score">
                 <header>
                   <span className="eval-run-score-name">{evaluatorNames.get(score.evaluatorId) ?? score.evaluatorId}</span>
-                  <span className={`eval-badge ${score.passed ? "eval-badge-current" : "eval-badge-warn"}`}>
+                  <span className={`eval-badge ${score.passed ? "eval-badge-ok" : "eval-badge-warn"}`}>
                     {score.score.toFixed(2)}{score.passed ? "" : ` · ${l("below threshold", "未达标")}`}
                   </span>
                 </header>
@@ -1340,7 +1381,7 @@ function RunComparison({
           </span>
         )}
         {totalDelta != null ? (
-          <span className={`eval-badge ${totalDelta >= 0 ? "eval-badge-current" : "eval-badge-warn"}`}>
+          <span className={`eval-badge ${totalDelta >= 0 ? "eval-badge-ok" : "eval-badge-warn"}`}>
             {l("avg score", "平均分")} {totalDelta >= 0 ? "+" : ""}{totalDelta.toFixed(2)}
           </span>
         ) : null}
@@ -1365,7 +1406,7 @@ function RunComparison({
                 {present.input.length > 60 ? `${present.input.slice(0, 60)}…` : present.input}
               </span>
               {delta != null ? (
-                <span className={`eval-badge ${delta > 0 ? "eval-badge-current" : delta < 0 ? "eval-badge-warn" : "eval-badge-dim"}`}>
+                <span className={`eval-badge ${delta > 0 ? "eval-badge-ok" : delta < 0 ? "eval-badge-warn" : "eval-badge-dim"}`}>
                   {delta > 0 ? "+" : ""}{delta.toFixed(2)}
                 </span>
               ) : !baseResult ? (

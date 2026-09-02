@@ -73,7 +73,12 @@ import {
   INITIAL_SKILL_USAGE_REFRESH_DELAY_MS,
 } from "../../core/refresh-policy";
 import type { ProjectSummary } from "../../core/types";
-import type { EvaluationRun, EvaluationRunSummary } from "../../automation/contracts";
+import type {
+  EvaluationRun,
+  EvaluationRunSummary,
+  EvaluationScoringConfig,
+} from "../../automation/contracts";
+import { isTechnicalWritingSkill } from "../../automation/engine/shared/evaluation/technical-writing-eval";
 import { evaluateSkillFindings, type SkillFinding } from "../../core/skill-eval-findings";
 import type { EvaluationService } from "./evaluation-service";
 
@@ -90,6 +95,8 @@ export interface SkillUsageHookSetup {
 export interface SkillEvalSuiteCase {
   input: string;
   expectedOutput?: string;
+  /** Source material supplied to the agent and judge separately from the task. */
+  context?: string;
 }
 
 export interface CreateSkillEvalSuiteInput {
@@ -139,6 +146,25 @@ export interface SkillEvalSuite {
   createdAt: number;
   updatedAt: number;
   lastRun: SkillEvalSuiteLastRun | null;
+}
+
+function technicalWritingScoring(): EvaluationScoringConfig {
+  return {
+    weightByLabels: { priority: { must: 2, should: 1 } },
+    resolvedThreshold: 0.75,
+    minCoverage: 1,
+    uncertain: "exclude",
+    requiredLabels: { priority: ["must"] },
+  };
+}
+
+function skillEvalCaseMetadata(
+  existing: Record<string, unknown> | undefined,
+  context: string | undefined,
+): Record<string, unknown> {
+  const metadata = { ...(existing ?? {}) };
+  delete metadata.context;
+  return { ...metadata, ...(context?.trim() ? { context } : {}) };
 }
 
 // Evidence-ladder state for a skill in the Eval overview. "unobserved" means
@@ -981,6 +1007,7 @@ export class SkillService {
       input.agentId.trim(),
       input.evaluatorIds,
       input.useBuiltinJudge,
+      name,
     );
     const now = this.dependencies.now();
     const dataset = await evaluations.saveDataset({
@@ -991,7 +1018,7 @@ export class SkillService {
         id: `case-${now}-${index}`,
         input: value.input,
         ...(value.expectedOutput !== undefined ? { expectedOutput: value.expectedOutput } : {}),
-        metadata: {},
+        metadata: skillEvalCaseMetadata(undefined, value.context),
         sequence: index,
       })),
       createdAt: now,
@@ -1005,6 +1032,7 @@ export class SkillService {
       agentId: input.agentId,
       evaluatorIds,
       repetitions: Math.max(1, Math.min(5, Math.floor(input.repetitions))),
+      ...(isTechnicalWritingSkill(name) ? { scoring: technicalWritingScoring() } : {}),
       skillName: name,
       skillHash: currentHash,
       createdAt: now,
@@ -1041,6 +1069,7 @@ export class SkillService {
       ...(item.expectedOutput !== undefined && item.expectedOutput !== null
         ? { expectedOutput: item.expectedOutput }
         : {}),
+      ...(typeof item.metadata.context === "string" ? { context: item.metadata.context } : {}),
     }));
   }
 
@@ -1061,6 +1090,7 @@ export class SkillService {
       input.agentId.trim(),
       input.evaluatorIds,
       input.useBuiltinJudge,
+      experiment.skillName ?? "",
     );
     const now = this.dependencies.now();
     // Item ids are preserved positionally so past runs stay joinable by
@@ -1073,7 +1103,7 @@ export class SkillService {
         id: dataset.items[index]?.id ?? `case-${now}-${index}`,
         input: value.input,
         ...(value.expectedOutput !== undefined ? { expectedOutput: value.expectedOutput } : {}),
-        metadata: dataset.items[index]?.metadata ?? {},
+        metadata: skillEvalCaseMetadata(dataset.items[index]?.metadata, value.context),
         sequence: index,
       })),
       updatedAt: now,
@@ -1084,6 +1114,9 @@ export class SkillService {
       agentId: input.agentId.trim(),
       evaluatorIds,
       repetitions: Math.max(1, Math.min(5, Math.floor(input.repetitions))),
+      ...(isTechnicalWritingSkill(experiment.skillName ?? "")
+        ? { scoring: technicalWritingScoring() }
+        : {}),
       updatedAt: now,
     });
     const skill = (experiment.skillName ?? "").trim();
@@ -1117,10 +1150,11 @@ export class SkillService {
     agentId: string,
     selectedIds: string[],
     useBuiltinJudge: boolean,
+    skillName: string,
   ): Promise<string[]> {
     const evaluatorIds = selectedIds.filter((item) => !item.startsWith("builtin-judge-"));
     if (useBuiltinJudge) {
-      const builtin = await evaluations.ensureBuiltinJudge(agentId);
+      const builtin = await evaluations.ensureBuiltinJudge(agentId, skillName);
       if (!evaluatorIds.includes(builtin.id)) evaluatorIds.unshift(builtin.id);
     }
     if (evaluatorIds.length === 0) throw new Error("At least one evaluator is required.");
@@ -1156,7 +1190,23 @@ export class SkillService {
     // Sync the built-in judge to its managed definition right before use, so
     // suites created under an older rubric pick up the current one.
     if (experiment.evaluatorIds.some((id) => id.startsWith("builtin-judge-"))) {
-      await evaluations.ensureBuiltinJudge(experiment.agentId);
+      const builtin = await evaluations.ensureBuiltinJudge(experiment.agentId, skill);
+      const evaluatorIds = [
+        builtin.id,
+        ...experiment.evaluatorIds.filter((evaluatorId) => !evaluatorId.startsWith("builtin-judge-")),
+      ];
+      if (
+        evaluatorIds.join("\n") !== experiment.evaluatorIds.join("\n")
+        || isTechnicalWritingSkill(skill)
+      ) {
+        await evaluations.saveExperiment({
+          ...experiment,
+          evaluatorIds,
+          ...(isTechnicalWritingSkill(skill) ? { scoring: technicalWritingScoring() } : {}),
+          skillHash: currentHash,
+          updatedAt: this.dependencies.now(),
+        });
+      }
     }
     // Attribute the run to the version that actually executes it.
     const runId = await evaluations.startExperiment(id, { skillHash: currentHash });

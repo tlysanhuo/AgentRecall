@@ -170,6 +170,61 @@ describe("LLM judge", () => {
     expect(result.verdicts?.[0]).toMatchObject({ status: "unmet", raw: 0.1 });
   });
 
+  it("records one independently labelled verdict per contracted LLM dimension", async () => {
+    const prompt = `<DimensionContract>[{"name":"事实准确","priority":"must"},{"name":"表达清晰","priority":"should"}]</DimensionContract>
+Judge {{output}} and return {"verdicts": [{"dimension": string, "score": number, "reason": string, "evidence": [], "failedCriteria": []}]}`;
+    const result = await runLlmJudge(
+      { evaluatorId: "tutorial", runtimeId: "claude", prompt, threshold: 0.75 },
+      { task: task(), artifact: artifact("draft") },
+      async () => ({
+        output: JSON.stringify({
+          verdicts: [
+            { dimension: "事实准确", score: 0.5, reason: "one claim is unsupported" },
+            { dimension: "表达清晰", score: 1, reason: "easy to follow" },
+          ],
+        }),
+        durationMs: 30,
+      }),
+    );
+
+    expect(result.status).toBe("pass");
+    expect(result.verdicts).toEqual([
+      expect.objectContaining({
+        verdictId: "judge-1:tutorial:事实准确",
+        labels: { dimension: "事实准确", evaluator: "llm_judge", priority: "must" },
+        raw: 0.5,
+        status: "unmet",
+        durationMs: 30,
+      }),
+      expect.objectContaining({
+        verdictId: "judge-1:tutorial:表达清晰",
+        labels: { dimension: "表达清晰", evaluator: "llm_judge", priority: "should" },
+        raw: 1,
+        status: "met",
+        durationMs: 0,
+      }),
+    ]);
+  });
+
+  it("excuses an incomplete contracted dimension set instead of hiding missing scores", async () => {
+    const prompt = `<DimensionContract>[{"name":"事实准确"},{"name":"表达清晰"}]</DimensionContract>
+Return {"verdicts": [{"dimension": string, "score": number, "failedCriteria": []}]}`;
+    const result = await runLlmJudge(
+      { evaluatorId: "tutorial", runtimeId: "claude", prompt, threshold: 0.75 },
+      { task: task(), artifact: artifact("draft") },
+      async () => ({
+        output: '{"verdicts":[{"dimension":"事实准确","score":1}]}',
+        durationMs: 4,
+      }),
+    );
+
+    expect(result).toMatchObject({
+      status: "excused",
+      attribution: { type: "judge_failure", reason: "judge_dimensions_incomplete" },
+    });
+    expect(result.verdicts).toBeUndefined();
+  });
+
   it("excuses a missing runtime instead of scoring the agent zero", async () => {
     const result = await runLlmJudge(
       { evaluatorId: "judge", runtimeId: "  ", prompt: "", threshold: 0.6 },
@@ -230,6 +285,19 @@ describe("LLM judge", () => {
       { evaluatorId: "judge", runtimeId: "claude", prompt: "", threshold: 0.6 },
       { task: task(), artifact: artifact("4") },
       async () => ({ output: '{"reason": "cannot tell"}', durationMs: 5 }),
+    );
+
+    expect(result).toMatchObject({
+      status: "excused",
+      attribution: { type: "judge_failure", reason: "judge_score_missing" },
+    });
+  });
+
+  it("does not coerce a null judge score into a deliberate zero", async () => {
+    const result = await runLlmJudge(
+      { evaluatorId: "judge", runtimeId: "claude", prompt: "", threshold: 0.6 },
+      { task: task(), artifact: artifact("4") },
+      async () => ({ output: '{"score":null,"reason":"not enough evidence"}', durationMs: 5 }),
     );
 
     expect(result).toMatchObject({

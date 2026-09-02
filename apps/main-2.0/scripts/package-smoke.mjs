@@ -32,6 +32,7 @@ const environment = {
 let workflowMcpProcess = null;
 let localPostgres = null;
 let localPostgresClient = null;
+const MAX_RELEASE_PACKAGE_BYTES = 4.25 * 1024 * 1024;
 
 async function chooseAvailablePort() {
   return new Promise((resolve, reject) => {
@@ -103,8 +104,8 @@ try {
   await Promise.all([packDir, prefix, stageRoot, home].map((directory) => mkdir(directory, { recursive: true })));
   const archive = await packReleaseArchive({ root, destination: packDir, environment });
   const archiveSize = (await stat(archive)).size;
-  if (archiveSize >= 4 * 1024 * 1024) {
-    throw new Error(`Release package is ${archiveSize} bytes; expected a package smaller than 4MB.`);
+  if (archiveSize >= MAX_RELEASE_PACKAGE_BYTES) {
+    throw new Error(`Release package is ${archiveSize} bytes; expected a package smaller than 4.25 MiB.`);
   }
   await execFileAsync(npm, ["install", "--global", archive, "--prefix", prefix, "--no-audit", "--no-fund"], {
     cwd: root,
@@ -132,6 +133,18 @@ try {
   await access(path.join(installedRoot, "bin", "openviking-opencode-plugin.mjs"));
   await access(path.join(installedRoot, "bin", "setup-openviking-memory-hooks.cjs"));
   await access(path.join(installedRoot, "THIRD_PARTY_NOTICES.md"));
+  await access(path.join(installedRoot, "assets", "bundled-skills", "rewrite-technical-tutorial", "SKILL.md"));
+  const diagramSkillRoot = path.join(installedRoot, "assets", "bundled-skills", "feishu-tech-diagram");
+  await access(path.join(diagramSkillRoot, "SKILL.md"));
+  await access(path.join(diagramSkillRoot, "tests", "validate_assets.py"));
+  const diagramSpecs = JSON.parse(await readFile(path.join(diagramSkillRoot, "references", "template-specs.json"), "utf8"));
+  if (!Array.isArray(diagramSpecs) || diagramSpecs.length !== 66) {
+    throw new Error("Packaged diagram Skill must include all 66 template specifications.");
+  }
+  const diagramSamples = await readdir(path.join(diagramSkillRoot, "assets", "samples"));
+  if (diagramSamples.filter((entry) => entry.endsWith(".svg")).length !== 66) {
+    throw new Error("Packaged diagram Skill must include all 66 SVG samples.");
+  }
   const installedRequire = createRequire(path.join(installedRoot, "package.json"));
   const {
     restoreEmbeddedPostgresNativeLinks,

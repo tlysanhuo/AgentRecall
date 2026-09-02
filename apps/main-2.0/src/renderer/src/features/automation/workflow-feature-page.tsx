@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
-import { Activity, ArrowLeft, Bot, Braces, CirclePause, Code2, Copy, File, FolderOpen, GitBranch, Hash, LayoutTemplate, List, Pause, Pencil, Play, Plus, RotateCcw, Save, Settings2, ShieldCheck, Square, ToggleLeft, Trash2, Type as TypeIcon, UserRound, X } from "lucide-react";
+import { Activity, ArrowLeft, Bot, Braces, CirclePause, Code2, Copy, File, FolderOpen, GitBranch, Hash, History, LayoutTemplate, List, Pause, Pencil, Play, Plus, RotateCcw, Save, Settings2, ShieldCheck, Square, ToggleLeft, Trash2, Type as TypeIcon, UserRound, X } from "lucide-react";
 import type {
   WorkflowDefinition,
   WorkflowInputDefinition,
@@ -106,6 +106,40 @@ function RunStatusBar({ run }: { run: WorkflowRun }): ReactElement {
     <span className="workflow-core-run-progress"><i><b style={{ width: `${progress}%` }} /></i><em>{completed}/{total}</em></span>
     <time>{formatRunDuration(run)}</time>
   </div>;
+}
+
+function RunHistoryBar({
+  language,
+  runs,
+  selectedRunId,
+  onSelect,
+}: {
+  language: LanguageMode;
+  runs: WorkflowRun[];
+  selectedRunId?: string;
+  onSelect: (run: WorkflowRun) => void;
+}): ReactElement {
+  const l = (en: string, zh: string): string => localize(language, en, zh);
+  return <section className="workflow-core-run-history" aria-label={l("Run history", "运行记录")}>
+    <header><History size={12} /><strong>{l("Run history", "运行记录")}</strong><span>{runs.length}</span></header>
+    {runs.length === 0 ? <p>{l("No runs yet. Start this Workflow to create the first result record.", "还没有运行记录。运行一次后，结果会保存在这里。")}</p> : <div className="workflow-core-run-history-list">
+      {runs.map((run) => {
+        const completed = Object.values(run.nodeRuns).filter((state) => state.status === "completed").length;
+        return <button
+          type="button"
+          key={run.id}
+          data-workflow-run-id={run.id}
+          className={`workflow-core-run-history-item is-${run.status}${run.id === selectedRunId ? " is-selected" : ""}`}
+          aria-pressed={run.id === selectedRunId}
+          onClick={() => onSelect(run)}
+        >
+          <span className="workflow-core-run-history-state"><i />{runStatusLabel[run.status]}</span>
+          <time title={new Date(run.startedAt).toLocaleString()}>{new Date(run.startedAt).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}</time>
+          <small>{completed}/{run.definition.nodes.length} {l("nodes", "节点")} · {formatRunDuration(run)}</small>
+        </button>;
+      })}
+    </div>}
+  </section>;
 }
 
 function updateAt<T>(items: T[], index: number, value: T): T[] {
@@ -320,6 +354,7 @@ export function WorkflowFeaturePage({
   const [definitions, setDefinitions] = useState<WorkflowDefinition[]>([]);
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
   const [selectedId, setSelectedId] = useState<string>();
+  const [selectedRunId, setSelectedRunId] = useState<string>();
   const [draft, setDraft] = useState<WorkflowDefinition>();
   const [selectedNodeId, setSelectedNodeId] = useState<string>();
   const [definitionInspectorOpen, setDefinitionInspectorOpen] = useState(false);
@@ -386,20 +421,29 @@ export function WorkflowFeaturePage({
       window.removeEventListener("blur", close);
     };
   }, [personalMenu]);
-  const activeRun = runs.filter((run) => run.workflowId === selectedId).sort((left, right) => right.startedAt - left.startedAt)[0];
+  const workflowRuns = runs
+    .filter((run) => run.workflowId === selectedId)
+    .sort((left, right) => right.startedAt - left.startedAt);
+  const latestRun = workflowRuns[0];
+  const selectedRun = workflowRuns.find((run) => run.id === selectedRunId) ?? latestRun;
+  const controllableRun = workflowRuns.find((run) => (
+    run.status === "running" || run.status === "paused" || run.status === "waiting"
+  ));
   useEffect(() => {
-    if (!activeRun || (activeRun.status !== "running" && activeRun.status !== "waiting")) return;
+    if (!controllableRun || (controllableRun.status !== "running" && controllableRun.status !== "waiting")) return;
     const timer = window.setInterval(() => void load(selectedId).catch(() => undefined), 1200);
     return () => window.clearInterval(timer);
-  }, [activeRun?.id, activeRun?.status, load, selectedId]);
+  }, [controllableRun?.id, controllableRun?.status, load, selectedId]);
   useEffect(() => {
-    if (mode !== "run" || selectedNodeId || !activeRun) return;
-    const activeNode = activeRun.definition.nodes.find((node) => {
-      const status = activeRun.nodeRuns[node.id]?.status;
+    if (mode !== "run" || selectedNodeId || !selectedRun) return;
+    const focusNode = selectedRun.definition.nodes.find((node) => {
+      const status = selectedRun.nodeRuns[node.id]?.status;
       return status === "running" || status === "waiting" || status === "failed";
-    });
-    if (activeNode) setSelectedNodeId(activeNode.id);
-  }, [activeRun, mode, selectedNodeId]);
+    }) ?? [...selectedRun.definition.nodes].reverse().find((node) => (
+      selectedRun.nodeRuns[node.id]?.status === "completed"
+    ));
+    if (focusNode) setSelectedNodeId(focusNode.id);
+  }, [selectedRun, mode, selectedNodeId]);
 
   const issues = draft ? validateWorkflowDefinition(draft, new Set(agents.map((agent) => agent.id))) : [];
   const templates = definitions.filter((definition) => definition.isTemplate);
@@ -407,7 +451,7 @@ export function WorkflowFeaturePage({
   const isTemplate = draft?.isTemplate === true;
   const selectedNode = draft?.nodes.find((node) => node.id === selectedNodeId);
   const selectDefinition = (definition: WorkflowDefinition): void => {
-    setSelectedId(definition.id); setDraft(structuredClone(definition)); setSelectedNodeId(undefined); setDefinitionInspectorOpen(false); setMode("definition"); setError(undefined);
+    setSelectedId(definition.id); setSelectedRunId(undefined); setDraft(structuredClone(definition)); setSelectedNodeId(undefined); setDefinitionInspectorOpen(false); setMode("definition"); setError(undefined);
     void load(definition.id).catch(() => undefined);
   };
   const useTemplate = async (): Promise<void> => {
@@ -445,7 +489,7 @@ export function WorkflowFeaturePage({
         const status = run.nodeRuns[node.id]?.status;
         return status === "running" || status === "waiting";
       });
-      setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]); setMode("run"); setSelectedNodeId(activeNode?.id);
+      setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]); setSelectedRunId(run.id); setMode("run"); setSelectedNodeId(activeNode?.id);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(false); }
   };
   const updateRun = (run: WorkflowRun): void => setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]);
@@ -513,16 +557,17 @@ export function WorkflowFeaturePage({
         <button type="button" className="agent-context-menu-item danger" disabled={busy || personalMenu.hasActiveRun !== false} onClick={() => void deletePersonalWorkflow(menuDefinition)}><Trash2 size={13} /><span>{localize(language, "Delete", "删除")}</span></button>
       </div> : null}
       {!draft ? <main className="workflow-core-empty">Create a Workflow to begin.</main> : <main className="workflow-core-main">
-        <header className="workflow-core-toolbar"><div className="workflow-core-toolbar-leading"><button type="button" className="workflow-core-title" onClick={() => { if (isTemplate) return; setSelectedNodeId(undefined); setDefinitionInspectorOpen(true); }}><strong>{draft.name}</strong><span>{draft.nodes.length} nodes · {isTemplate ? "只读模板" : `${draft.inputs.length} inputs`}</span></button>{!isTemplate ? <div className="workflow-core-mode"><button type="button" className={mode === "definition" ? "is-active" : ""} onClick={() => setMode("definition")}>Definition</button><button type="button" className={mode === "run" ? "is-active" : ""} onClick={() => { setMode("run"); setDefinitionInspectorOpen(false); }}>Current run{activeRun ? ` · ${activeRun.status}` : ""}</button></div> : <span className="workflow-core-template-badge"><LayoutTemplate size={11} /> 模板预览</span>}</div><div className="workflow-core-toolbar-actions">
-          {isTemplate ? <button type="button" className="send-btn compact" disabled={busy} onClick={() => void useTemplate()}><Copy size={13} /> 使用模板</button> : <>{mode === "definition" ? <button type="button" className="icon-btn" title="Workflow properties" aria-label="Workflow properties" onClick={() => { setSelectedNodeId(undefined); setDefinitionInspectorOpen(true); }}><Settings2 size={14} /></button> : null}<button type="button" className="control-btn compact" disabled={busy} onClick={() => void save()}><Save size={13} /> Save</button>{activeRun?.status === "running" ? <><button type="button" className="control-btn compact" disabled={busy} onClick={() => void changeRunState(() => api.pauseWorkflowRun(activeRun.id))}><Pause size={13} /> 暂停</button><button type="button" className="control-btn compact is-danger" disabled={busy} onClick={() => void changeRunState(() => api.cancelWorkflowRun(activeRun.id))}><Square size={12} /> 取消</button></> : activeRun?.status === "paused" ? <><button type="button" className="send-btn compact" disabled={busy} onClick={() => void changeRunState(() => api.resumeWorkflowRun(activeRun.id))}><Play size={13} /> 继续</button><button type="button" className="control-btn compact is-danger" disabled={busy} onClick={() => void changeRunState(() => api.cancelWorkflowRun(activeRun.id))}><Square size={12} /> 取消</button></> : activeRun?.status === "waiting" ? <button type="button" className="control-btn compact is-danger" disabled={busy} onClick={() => void changeRunState(() => api.cancelWorkflowRun(activeRun.id))}><Square size={12} /> 取消</button> : <button type="button" className="send-btn compact" disabled={busy || issues.length > 0} onClick={() => void start()}><GitBranch size={13} /> Run</button>}<button type="button" className="icon-btn" aria-label="Delete Workflow" disabled={busy || activeRun?.status === "running" || activeRun?.status === "paused" || activeRun?.status === "waiting"} onClick={() => void deletePersonalWorkflow(draft)}><Trash2 size={14} /></button></>}
+        <header className="workflow-core-toolbar"><div className="workflow-core-toolbar-leading"><button type="button" className="workflow-core-title" onClick={() => { if (isTemplate) return; setSelectedNodeId(undefined); setDefinitionInspectorOpen(true); }}><strong>{draft.name}</strong><span>{draft.nodes.length} nodes · {isTemplate ? "只读模板" : `${draft.inputs.length} inputs`}</span></button>{!isTemplate ? <div className="workflow-core-mode"><button type="button" className={mode === "definition" ? "is-active" : ""} onClick={() => setMode("definition")}>{localize(language, "Definition", "定义")}</button><button type="button" className={mode === "run" ? "is-active" : ""} onClick={() => { setMode("run"); setDefinitionInspectorOpen(false); }}>{localize(language, "Run history", "运行记录")}{workflowRuns.length > 0 ? ` · ${workflowRuns.length}` : ""}</button></div> : <span className="workflow-core-template-badge"><LayoutTemplate size={11} /> 模板预览</span>}</div><div className="workflow-core-toolbar-actions">
+          {isTemplate ? <button type="button" className="send-btn compact" disabled={busy} onClick={() => void useTemplate()}><Copy size={13} /> 使用模板</button> : <>{mode === "definition" ? <button type="button" className="icon-btn" title="Workflow properties" aria-label="Workflow properties" onClick={() => { setSelectedNodeId(undefined); setDefinitionInspectorOpen(true); }}><Settings2 size={14} /></button> : null}<button type="button" className="control-btn compact" disabled={busy} onClick={() => void save()}><Save size={13} /> Save</button>{controllableRun?.status === "running" ? <><button type="button" className="control-btn compact" disabled={busy} onClick={() => void changeRunState(() => api.pauseWorkflowRun(controllableRun.id))}><Pause size={13} /> 暂停</button><button type="button" className="control-btn compact is-danger" disabled={busy} onClick={() => void changeRunState(() => api.cancelWorkflowRun(controllableRun.id))}><Square size={12} /> 取消</button></> : controllableRun?.status === "paused" ? <><button type="button" className="send-btn compact" disabled={busy} onClick={() => void changeRunState(() => api.resumeWorkflowRun(controllableRun.id))}><Play size={13} /> 继续</button><button type="button" className="control-btn compact is-danger" disabled={busy} onClick={() => void changeRunState(() => api.cancelWorkflowRun(controllableRun.id))}><Square size={12} /> 取消</button></> : controllableRun?.status === "waiting" ? <button type="button" className="control-btn compact is-danger" disabled={busy} onClick={() => void changeRunState(() => api.cancelWorkflowRun(controllableRun.id))}><Square size={12} /> 取消</button> : <button type="button" className="send-btn compact" disabled={busy || issues.length > 0} onClick={() => void start()}><GitBranch size={13} /> Run</button>}<button type="button" className="icon-btn" aria-label="Delete Workflow" disabled={busy || Boolean(controllableRun)} onClick={() => void deletePersonalWorkflow(draft)}><Trash2 size={14} /></button></>}
         </div></header>
         {error ? <div className="workflow-core-banner is-error">{error}</div> : null}
         {issues.length > 0 && mode === "definition" && !isTemplate ? <div className="workflow-core-banner"><strong>{issues.length} definition issue{issues.length === 1 ? "" : "s"}</strong><span>{issues[0]!.path}: {issues[0]!.message}</span></div> : null}
-        {mode === "run" && activeRun ? <RunStatusBar run={activeRun} /> : null}
+        {mode === "run" ? <RunHistoryBar language={language} runs={workflowRuns} selectedRunId={selectedRun?.id} onSelect={(run) => { setSelectedRunId(run.id); setSelectedNodeId(undefined); setDefinitionInspectorOpen(false); }} /> : null}
+        {mode === "run" && selectedRun ? <RunStatusBar run={selectedRun} /> : null}
         <div className="workflow-core-workbench">
-          <WorkflowGraphCanvas definition={draft} run={activeRun} mode={isTemplate ? "definition" : mode} agents={agents} readOnly={isTemplate} selectedNodeId={selectedNodeId} onSelectNode={(nodeId) => { setSelectedNodeId(nodeId); setDefinitionInspectorOpen(false); }} onPositionsChange={(positions) => { if (isTemplate) return; setDraft((current) => current ? { ...current, nodes: current.nodes.map((node) => positions[node.id] ? { ...node, position: positions[node.id] } : node) } : current); }} />
+          <WorkflowGraphCanvas definition={mode === "run" && selectedRun ? selectedRun.definition : draft} run={selectedRun} mode={isTemplate ? "definition" : mode} agents={agents} readOnly={isTemplate} selectedNodeId={selectedNodeId} onSelectNode={(nodeId) => { setSelectedNodeId(nodeId); setDefinitionInspectorOpen(false); }} onPositionsChange={(positions) => { if (isTemplate) return; setDraft((current) => current ? { ...current, nodes: current.nodes.map((node) => positions[node.id] ? { ...node, position: positions[node.id] } : node) } : current); }} />
           {mode === "definition" && !isTemplate ? <div className="workflow-core-add-dock">{nodeKinds.map(({ kind, label, icon: Icon }) => <button type="button" key={kind} onClick={() => { const next = addWorkflowNode(draft, kind, agents[0]?.id ?? ""); setDraft(next); setSelectedNodeId(next.nodes.at(-1)?.id); setDefinitionInspectorOpen(false); }}><Icon size={13} /> {label}</button>)}</div> : null}
-          {!isTemplate && (mode === "run" ? Boolean(selectedNodeId) : Boolean(selectedNode || definitionInspectorOpen)) ? <aside key={`${mode}:${selectedNodeId ?? "definition"}`} className={`workflow-core-inspector${mode === "run" ? " is-run" : ""}`}><button type="button" className="workflow-core-inspector-close icon-btn" aria-label="Close inspector" onClick={() => { setSelectedNodeId(undefined); setDefinitionInspectorOpen(false); }}><X size={15} /></button>{mode === "run" ? <RunInspector run={activeRun} selectedNodeId={selectedNodeId} liveOutput={activeRun && selectedNodeId ? runStreams[workflowRunStreamKey(activeRun.id, selectedNodeId)] : undefined} onRetry={(nodeId) => void changeRunState(() => api.retryWorkflowNode(activeRun!.id, nodeId))} onApprove={(nodeId, decision) => void changeRunState(() => api.resolveWorkflowApproval(activeRun!.id, nodeId, { decision, comment: "" }))} /> : selectedNode ? <NodeInspector definition={draft} node={selectedNode} agentIds={agents} language={language} onChange={updateNode} onDelete={() => { setDraft((current) => current ? { ...current, nodes: current.nodes.filter((item) => item.id !== selectedNode.id).map((item) => ({ ...item, inputs: item.inputs.filter((input) => input.source !== "node" || input.nodeId !== selectedNode.id) } as WorkflowNode)) } : current); setSelectedNodeId(undefined); }} /> : <DefinitionInspector definition={draft} runInputs={runInputs} defaultWorkDir={globalWorkDir} isNewDraft={newDraftIds.has(draft.id)} language={language} onChange={setDraft} onPickWorkDir={() => void pickWorkDir()} onClearWorkDir={clearWorkDir} onRunInputChange={(key, value) => setRunInputs((current) => ({ ...current, [key]: value }))} />}</aside> : null}
+          {!isTemplate && (mode === "run" ? Boolean(selectedNodeId) : Boolean(selectedNode || definitionInspectorOpen)) ? <aside key={`${mode}:${selectedRun?.id ?? "none"}:${selectedNodeId ?? "definition"}`} className={`workflow-core-inspector${mode === "run" ? " is-run" : ""}`}><button type="button" className="workflow-core-inspector-close icon-btn" aria-label="Close inspector" onClick={() => { setSelectedNodeId(undefined); setDefinitionInspectorOpen(false); }}><X size={15} /></button>{mode === "run" ? <RunInspector run={selectedRun} selectedNodeId={selectedNodeId} liveOutput={selectedRun && selectedNodeId ? runStreams[workflowRunStreamKey(selectedRun.id, selectedNodeId)] : undefined} onRetry={(nodeId) => { if (selectedRun) void changeRunState(() => api.retryWorkflowNode(selectedRun.id, nodeId)); }} onApprove={(nodeId, decision) => { if (selectedRun) void changeRunState(() => api.resolveWorkflowApproval(selectedRun.id, nodeId, { decision, comment: "" })); }} /> : selectedNode ? <NodeInspector definition={draft} node={selectedNode} agentIds={agents} language={language} onChange={updateNode} onDelete={() => { setDraft((current) => current ? { ...current, nodes: current.nodes.filter((item) => item.id !== selectedNode.id).map((item) => ({ ...item, inputs: item.inputs.filter((input) => input.source !== "node" || input.nodeId !== selectedNode.id) } as WorkflowNode)) } : current); setSelectedNodeId(undefined); }} /> : <DefinitionInspector definition={draft} runInputs={runInputs} defaultWorkDir={globalWorkDir} isNewDraft={newDraftIds.has(draft.id)} language={language} onChange={setDraft} onPickWorkDir={() => void pickWorkDir()} onClearWorkDir={clearWorkDir} onRunInputChange={(key, value) => setRunInputs((current) => ({ ...current, [key]: value }))} />}</aside> : null}
         </div>
       </main>}
     </div>

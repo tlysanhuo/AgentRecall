@@ -189,6 +189,10 @@ const evaluationRunListSchema = z.object({
   offset: z.number().int().nonnegative().max(1_000_000).optional(),
   limit: z.number().int().min(1).max(100).optional(),
 }).strict();
+const evaluationArtifactOpenSchema = z.object({
+  runId: idSchema,
+  resultId: idSchema,
+}).strict();
 const workflowIdSchema = z.object({ workflowId: idSchema });
 const boundedWorkflowObjectSchema = z.record(z.string().max(200), z.unknown()).refine(
   (value) => isBoundedJsonValue(value),
@@ -284,6 +288,7 @@ interface RegisterAutomationIpcOptions {
   pickDirectory?: (defaultPath?: string) => Promise<string | undefined>;
   readLocalFile?: (filePath: string, allowedRoots: string[]) => Promise<LocalFilePreview>;
   revealPath?: (filePath: string) => Promise<string>;
+  openEvaluationArtifact?: (request: { runId: string; resultId: string }) => Promise<string>;
 }
 
 export function registerAutomationIpc({
@@ -293,6 +298,7 @@ export function registerAutomationIpc({
   pickDirectory,
   readLocalFile,
   revealPath,
+  openEvaluationArtifact,
 }: RegisterAutomationIpcOptions): () => void {
   const ready = <Args extends unknown[], Result>(
     channel: string,
@@ -398,6 +404,10 @@ export function registerAutomationIpc({
     service.evaluations.getRun(idSchema.parse(value)));
   ready(AUTOMATION_CHANNELS.evaluationRunDelete, (value: unknown) =>
     service.evaluations.deleteRun(idSchema.parse(value)));
+  ready(AUTOMATION_CHANNELS.evaluationArtifactOpen, async (value: unknown) => {
+    if (!openEvaluationArtifact) throw new Error("Opening evaluation artifacts is unavailable.");
+    return openEvaluationArtifact(evaluationArtifactOpenSchema.parse(value));
+  });
 
   ready(AUTOMATION_CHANNELS.workflowCoreGet, (value: unknown) =>
     service.workflowCore.snapshot(value === undefined ? undefined : idSchema.parse(value)));

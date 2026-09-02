@@ -976,4 +976,49 @@ describe("AgentRecall PostgreSQL schema", () => {
     }]);
     await repeatedDatabase.close();
   });
+
+  it("migrates legacy evaluation scores so one judge can persist several dimensions", async () => {
+    const pool = new PGliteTestPool();
+    const legacyDatabase = new PostgresDatabase(pool, {
+      migrationLock: false,
+      migrations: POSTGRES_MIGRATIONS.filter((migration) => migration.version <= 45),
+    });
+    await legacyDatabase.initialize();
+    await legacyDatabase.query(`
+      insert into agent_recall.evaluation_datasets (
+        id, name, description, created_at, updated_at
+      ) values ('dataset-multi', 'multi', '', now(), now());
+      insert into agent_recall.evaluation_experiments (
+        id, name, dataset_id, agent_id, repetitions, created_at, updated_at
+      ) values ('experiment-multi', 'multi', 'dataset-multi', 'agent', 1, now(), now());
+      insert into agent_recall.evaluation_runs (
+        id, experiment_id, status, started_at
+      ) values ('run-multi', 'experiment-multi', 'completed', now());
+      insert into agent_recall.evaluation_case_results (
+        id, run_id, dataset_item_id, repetition, input, output, duration_ms
+      ) values ('case-multi', 'run-multi', 'item', 1, 'input', 'output', 1);
+      insert into agent_recall.evaluation_scores (
+        case_result_id, evaluator_id, score, passed, duration_ms, dimension
+      ) values ('case-multi', 'judge', 1, true, 1, null);
+    `);
+
+    const upgradedDatabase = new PostgresDatabase(pool, {
+      migrationLock: false,
+      migrations: POSTGRES_MIGRATIONS,
+    });
+    await upgradedDatabase.initialize();
+    await upgradedDatabase.query(`
+      insert into agent_recall.evaluation_scores (
+        case_result_id, evaluator_id, score, passed, duration_ms, dimension
+      ) values ('case-multi', 'judge', 0.75, true, 1, '正确性');
+    `);
+    const dimensions = await upgradedDatabase.query<{ dimension: string }>(`
+      select dimension
+        from agent_recall.evaluation_scores
+       where case_result_id = 'case-multi' and evaluator_id = 'judge'
+       order by dimension
+    `);
+    expect(dimensions.rows.map((row) => row.dimension)).toEqual(["judge", "正确性"]);
+    await upgradedDatabase.close();
+  });
 });

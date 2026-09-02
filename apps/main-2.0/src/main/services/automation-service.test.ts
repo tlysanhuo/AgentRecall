@@ -304,6 +304,8 @@ describe("NativeAutomationService", () => {
       "/mcp/studio/list-members",
       {},
     );
+    expect(bridgeOptions?.coreWorkflow?.submitNodeOutput({ executionId: "unknown" }))
+      .toBeUndefined();
     expect(hub.setWorkflowMcpManagedToken).toHaveBeenCalledWith("test-token");
     expect(hub.refreshDiscoverableModelCatalogs).not.toHaveBeenCalled();
     expect(service.health()).toEqual({ state: "ready" });

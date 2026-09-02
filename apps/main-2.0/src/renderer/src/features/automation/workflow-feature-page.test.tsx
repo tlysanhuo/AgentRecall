@@ -132,8 +132,8 @@ describe("WorkflowFeaturePage live output", () => {
       await Promise.resolve();
     });
     const runTab = [...container.querySelectorAll<HTMLButtonElement>(".workflow-core-mode button")]
-      .find((button) => button.textContent?.includes("Current run"));
-    if (!runTab) throw new Error("Current run tab was not rendered");
+      .find((button) => button.textContent?.includes("运行记录"));
+    if (!runTab) throw new Error("Run history tab was not rendered");
 
     await act(async () => {
       runTab.click();
@@ -158,8 +158,8 @@ describe("WorkflowFeaturePage live output", () => {
       await Promise.resolve();
     });
     const runTab = [...container.querySelectorAll<HTMLButtonElement>(".workflow-core-mode button")]
-      .find((button) => button.textContent?.includes("Current run"));
-    if (!runTab) throw new Error("Current run tab was not rendered");
+      .find((button) => button.textContent?.includes("运行记录"));
+    if (!runTab) throw new Error("Run history tab was not rendered");
     await act(async () => {
       runTab.click();
       await Promise.resolve();
@@ -178,6 +178,51 @@ describe("WorkflowFeaturePage live output", () => {
       .toEqual(expect.arrayContaining(["第一项", "第二项"]));
     expect(output.textContent).toContain("新增会话来源");
     expect(output.textContent).toContain("types.ts");
+  });
+
+  it("lists persisted runs and opens the selected run's recorded result", async () => {
+    const older = completedWorkflow();
+    older.run.id = "run-older";
+    older.run.startedAt = 10;
+    older.run.finishedAt = 20;
+    older.run.nodeRuns["inspect-code"]!.outputs!.architecture = "较早一次的结果";
+    const latest = completedWorkflow();
+    latest.run.id = "run-latest";
+    latest.run.startedAt = 30;
+    latest.run.finishedAt = 40;
+    latest.run.nodeRuns["inspect-code"]!.outputs!.architecture = "最新一次的结果";
+    api.getWorkflowCore.mockResolvedValue({
+      definitions: [latest.definition],
+      runs: [older.run, latest.run],
+    });
+
+    await act(async () => {
+      root.render(<WorkflowFeaturePage language="zh" globalReviewEnabled runtimeReviewEnabled />);
+      await Promise.resolve();
+    });
+    const runTab = [...container.querySelectorAll<HTMLButtonElement>(".workflow-core-mode button")]
+      .find((button) => button.textContent?.includes("运行记录"));
+    if (!runTab) throw new Error("Run history tab was not rendered");
+    await act(async () => {
+      runTab.click();
+      await Promise.resolve();
+    });
+
+    const historyItems = container.querySelectorAll<HTMLButtonElement>(".workflow-core-run-history-item");
+    expect(historyItems).toHaveLength(2);
+    expect(container.querySelector<HTMLButtonElement>('[data-workflow-run-id="run-latest"]')?.getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-workflow-run-id="run-older"]')?.click();
+      container.querySelector<HTMLButtonElement>("[data-testid='workflow-graph']")?.click();
+      await Promise.resolve();
+    });
+
+    const output = [...container.querySelectorAll<HTMLDetailsElement>(".workflow-core-run-disclosure")]
+      .find((details) => details.querySelector("summary")?.textContent?.includes("输出"));
+    expect(container.querySelector<HTMLButtonElement>('[data-workflow-run-id="run-older"]')?.getAttribute("aria-pressed")).toBe("true");
+    expect(output?.textContent).toContain("较早一次的结果");
+    expect(output?.textContent).not.toContain("最新一次的结果");
   });
 
   it("checks the right-clicked Workflow before enabling deletion", async () => {

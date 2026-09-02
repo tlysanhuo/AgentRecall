@@ -68,6 +68,13 @@ export interface EvaluationCaseOutcome {
   score: EvaluationCaseScore;
   /** The artifact's answer text; empty when no artifact was produced. */
   output: string;
+  /**
+   * Everything else the artifact is: where it came from and which files it
+   * consists of. Absent when the source failed before producing one, which is
+   * what distinguishes "the agent answered with nothing" from "there was no
+   * artifact to judge".
+   */
+  artifact?: EvaluationArtifactValue;
   durationMs: number;
   sessionKey?: string;
   skill?: EvaluationSkillInjection;
@@ -167,8 +174,9 @@ async function runCase(
     cancelled: execution.cancelled,
   });
   const score = scoreEvaluationCase(aggregate, plan.scoring ?? {});
-  const artifact = firstValue<EvaluationArtifactValue>(execution.values, "artifact");
+  const rawArtifact = firstValue<EvaluationArtifactValue>(execution.values, "artifact");
   const trajectory = firstValue<EvaluationTrajectoryValue>(execution.values, "trajectory");
+  const artifact = await completeArtifact(rawArtifact, trajectory, dependencies);
   const instructions = execution.values.get(SKILL_NODE_ID)?.get("instructions") as
     | EvaluationInstructionsValue
     | undefined;
@@ -179,6 +187,7 @@ async function runCase(
     aggregate,
     score,
     output: artifact?.output ?? "",
+    ...(artifact ? { artifact } : {}),
     durationMs: artifact?.durationMs ?? trajectory?.durationMs ?? 0,
     ...(trajectory?.sessionKey ? { sessionKey: trajectory.sessionKey } : {}),
     ...(instructions?.skill ? { skill: instructions.skill } : {}),
@@ -188,6 +197,50 @@ async function runCase(
       : {}),
     cancelled: execution.cancelled,
   };
+}
+
+/**
+ * Fills in the half of a fresh run's artifact that only its session can tell us.
+ *
+ * A run produces its answer before the session that recorded it has been found,
+ * so at the moment `run_agent` returns there is no way to know which files were
+ * written. Once the session-link step has a session key, both are available, and
+ * this is where they are put back together — the artifact a judge and a report
+ * read is then the same shape whether it came from a fresh run, a stored session
+ * or a folder.
+ *
+ * A reader that fails is ignored on purpose. Files are an observation, and losing
+ * one must not cost the case its answer.
+ */
+async function completeArtifact(
+  artifact: EvaluationArtifactValue | undefined,
+  trajectory: EvaluationTrajectoryValue | undefined,
+  dependencies: EvaluationNodeDependencies,
+): Promise<EvaluationArtifactValue | undefined> {
+  if (!artifact || artifact.origin.kind !== "agent_run") return artifact;
+  const sessionKey = trajectory?.sessionKey?.trim();
+  if (!sessionKey) return artifact;
+  const files = artifact.files ?? await readFilesQuietly(dependencies, sessionKey);
+  return {
+    ...artifact,
+    ...(files && files.length > 0 ? { files } : {}),
+    // A fresh run's artifact does live somewhere once it has been linked, and a
+    // reader that cannot say where would send anyone verifying a score back to
+    // the run log.
+    origin: { ...artifact.origin, reference: sessionKey },
+  };
+}
+
+async function readFilesQuietly(
+  dependencies: EvaluationNodeDependencies,
+  sessionKey: string,
+): Promise<EvaluationArtifactValue["files"]> {
+  if (!dependencies.readArtifactFiles) return undefined;
+  try {
+    return await dependencies.readArtifactFiles(sessionKey) ?? undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

@@ -172,6 +172,7 @@ import {
   type OpenVikingRuntimeManifest,
 } from "./services/openviking-runtime-service";
 import { NativeAutomationService } from "./services/automation-service";
+import { materializeEvaluationArtifactFile } from "./services/evaluation-artifact-file";
 import {
   BuiltinSessionSearchServer,
   BuiltinEvalMcpServer,
@@ -205,6 +206,7 @@ import type {
   EvaluationTrajectoryValue,
 } from "../core/evaluation/nodes/contracts";
 import { createJudgeScriptRunner } from "../core/evaluation/judge-script-runner";
+import { artifactFilesFromTrace } from "../core/evaluation/artifact-files";
 import type {
   EnvironmentUpsertInput,
   MigrationAgent,
@@ -576,9 +578,32 @@ async function readEvaluationSessionArtifact(
 ): Promise<{ output: string; files?: EvaluationArtifactFile[] } | null> {
   const session = await store.getSession(sessionKey);
   if (!session) return null;
-  const messages = await store.getAllMessages(sessionKey);
+  const [messages, files] = await Promise.all([
+    store.getAllMessages(sessionKey),
+    readEvaluationArtifactFiles(sessionKey),
+  ]);
   const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
-  return { output: lastAssistant?.content ?? "" };
+  return {
+    output: lastAssistant?.content ?? "",
+    ...(files && files.length > 0 ? { files } : {}),
+  };
+}
+
+/**
+ * Which files a session's tool calls touched.
+ *
+ * An agent asked to fix a bug produces a diff, and a judge that can only read the
+ * final message cannot tell a real fix from a description of one. Only the tool
+ * calls AgentRecall recognises are reported — see `artifactFilesFromTrace` — so an
+ * empty result means "none seen", which is why the caller drops it rather than
+ * storing an empty list.
+ */
+async function readEvaluationArtifactFiles(
+  sessionKey: string,
+): Promise<EvaluationArtifactFile[] | null> {
+  const events = await store.getTraceEvents(sessionKey);
+  const files = artifactFilesFromTrace(events);
+  return files.length > 0 ? files : null;
 }
 
 const ARTIFACT_OUTPUT_FILES = ["output.md", "answer.md", "OUTPUT.md", "ANSWER.md"];
@@ -712,6 +737,7 @@ function createAutomationService(): NativeAutomationService {
     },
     readEvaluationTrajectory: (sessionKey) => readEvaluationTrajectory(sessionKey),
     readEvaluationSessionArtifact: (sessionKey) => readEvaluationSessionArtifact(sessionKey),
+    readEvaluationArtifactFiles: (sessionKey) => readEvaluationArtifactFiles(sessionKey),
     readEvaluationFolderArtifact: (directory) => readEvaluationFolderArtifact(directory),
     // Inline JS judges always run, sandboxed. A command judge is a real process,
     // so it is read from the setting on every call rather than captured here.
@@ -2616,6 +2642,21 @@ function registerIpc(): void {
       );
       shell.showItemInFolder(resolvedPath);
       return resolvedPath;
+    },
+    openEvaluationArtifact: async ({ runId, resultId }) => {
+      const run = await automationService!.evaluations.getRun(runId);
+      if (!run) throw new Error(`Evaluation run was not found: ${runId}`);
+      const experiment = (await automationService!.evaluations.listExperiments())
+        .find((item) => item.id === run.experimentId);
+      const filePath = await materializeEvaluationArtifactFile({
+        userDataPath: app.getPath("userData"),
+        run,
+        experimentName: experiment?.name || run.experimentId,
+        resultId,
+      });
+      const error = await shell.openPath(filePath);
+      if (error) throw new Error(`The evaluation artifact could not be opened: ${error}`);
+      return filePath;
     },
   });
   disposeTeamChatIpc = registerTeamChatIpc({

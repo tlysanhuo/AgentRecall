@@ -5,6 +5,15 @@ import type {
   EvaluatorKind,
 } from "./evaluation/types";
 import { JUDGE_PROMPTS } from "./evaluation/evaluator-prompts";
+import {
+  TECHNICAL_WRITING_EVAL_CASES,
+  TECHNICAL_WRITING_JUDGE_PROMPT,
+} from "./evaluation/technical-writing-eval";
+import {
+  ONE_BITE_TEACHING_JUDGE_PROMPT,
+  STRUCTURED_OUTPUT_JUDGE_PROMPT,
+  TECHNICAL_DESIGN_JUDGE_PROMPT,
+} from "./evaluation/starter-plan-rubrics";
 
 export interface EvaluationDatasetTemplate {
   id: string;
@@ -150,6 +159,17 @@ export const DATASET_TEMPLATES: EvaluationDatasetTemplate[] = [
         metadata: { genre: "summary", maxCharacters: 80 },
       },
     ],
+  },
+  {
+    id: "technical-writing-skill",
+    name: "技术教程写作 Skill 对抗集",
+    description: "用源码冲突、状态生命周期、伪并行、验证边界和提示注入测试技术教程写作 Skill。",
+    category: "writing",
+    items: TECHNICAL_WRITING_EVAL_CASES.map((item) => ({
+      input: item.input,
+      expectedOutput: item.expectedOutput,
+      metadata: { scenario: item.id, context: item.context },
+    })),
   },
 ];
 
@@ -375,6 +395,42 @@ export const EVALUATOR_TEMPLATES: EvaluationEvaluatorTemplate[] = [
     kind: "llm_judge",
     threshold: 1,
     prompt: JUDGE_PROMPTS["code-security"],
+  },
+  {
+    id: "technical-writing-rubric",
+    name: "技术教程十维评审",
+    description: "一次 Judge 调用分别评估事实、机制、状态、代码、失败、图示、验证、结构、表达和注入抵抗。",
+    category: "specialized",
+    kind: "llm_judge",
+    threshold: 0.75,
+    prompt: TECHNICAL_WRITING_JUDGE_PROMPT,
+  },
+  {
+    id: "technical-design-multidimension",
+    name: "技术方案九维评审",
+    description: "按当前设计阶段分别评估目标范围、事实假设、权衡、架构、状态、可靠性、交付和可评审性。",
+    category: "specialized",
+    kind: "llm_judge",
+    threshold: 0.75,
+    prompt: TECHNICAL_DESIGN_JUDGE_PROMPT,
+  },
+  {
+    id: "one-bite-teaching-multidimension",
+    name: "单点教学七维评审",
+    description: "评估一次只讲一个技术点时的聚焦、准确、机制、例子、边界、节奏和表达。",
+    category: "specialized",
+    kind: "llm_judge",
+    threshold: 0.8,
+    prompt: ONE_BITE_TEACHING_JUDGE_PROMPT,
+  },
+  {
+    id: "structured-output-multidimension",
+    name: "结构化输出四维评审",
+    description: "在 JSON 合法性之外评估语义、字段与类型、约束遵循和下游可消费性。",
+    category: "specialized",
+    kind: "llm_judge",
+    threshold: 0.85,
+    prompt: STRUCTURED_OUTPUT_JUDGE_PROMPT,
   },
 ];
 

@@ -47,6 +47,9 @@ export interface StartMcpBridgeOptions {
       body: unknown,
     ): Promise<unknown>;
   };
+  coreWorkflow?: {
+    submitNodeOutput(body: unknown): Promise<unknown | undefined> | unknown | undefined;
+  };
 }
 
 interface McpBridgeRuntimeOptions {
@@ -54,6 +57,7 @@ interface McpBridgeRuntimeOptions {
   fetcher?: typeof fetch;
   studio?: StartMcpBridgeOptions["studio"];
   studioToken?: string;
+  coreWorkflow?: StartMcpBridgeOptions["coreWorkflow"];
   updateConfiguredAgents?: StartMcpBridgeOptions["updateConfiguredAgents"];
   gateway?: StartMcpBridgeOptions["gateway"];
 }
@@ -314,6 +318,10 @@ async function routeWorkflowRequest(hub: AgentHub, route: string, body: unknown,
     return options.studio.handleMcpRequest(options.studioToken, route, body);
   }
   const record = asRecord(body);
+  if (route === "/mcp/workflow/node/complete" && options.coreWorkflow) {
+    const coreResult = await options.coreWorkflow.submitNodeOutput(body);
+    if (coreResult !== undefined) return coreResult;
+  }
   const lifecycle = await routeWorkflowMcpLifecycle(hub, route, body);
   if (lifecycle) return lifecycle;
   if (route === "/mcp/agent-templates/list" || route === "/mcp/skill-templates/list") return skillTemplateListPayload();
@@ -516,6 +524,7 @@ export async function startMcpBridge(hub: AgentHub, options: StartMcpBridgeOptio
         if (options.bundledSkillsRoot) runtimeOptions.bundledSkillsRoot = options.bundledSkillsRoot;
         if (options.fetcher) runtimeOptions.fetcher = options.fetcher;
         if (options.studio) runtimeOptions.studio = options.studio;
+        if (options.coreWorkflow) runtimeOptions.coreWorkflow = options.coreWorkflow;
         if (options.updateConfiguredAgents) runtimeOptions.updateConfiguredAgents = options.updateConfiguredAgents;
         if (options.gateway) runtimeOptions.gateway = options.gateway;
         if (typeof studioToken === "string") runtimeOptions.studioToken = studioToken;

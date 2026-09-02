@@ -73,9 +73,26 @@ export function nodeStatusText(
   return l("skipped", "未执行");
 }
 
+/**
+ * Colour by what the status means, not by severity.
+ *
+ * Four readings, and keeping them apart is the point of the whole subsystem:
+ * green decided and met, red decided and unmet, amber something broke, grey
+ * nothing was decided. An excused step is grey rather than red — it says the
+ * evaluation could not judge, not that the agent did badly.
+ */
 export function nodeStatusClass(status: EvaluationNodeRecord["status"]): string {
-  if (status === "pass") return "eval-badge-current";
+  if (status === "pass") return "eval-badge-ok";
   if (status === "fail") return "eval-badge-warn";
+  if (status === "error") return "eval-badge-attn";
+  return "eval-badge-dim";
+}
+
+/** Same reading, for a whole run. */
+export function runStatusClass(status: string): string {
+  if (status === "completed") return "eval-badge-ok";
+  if (status === "failed") return "eval-badge-warn";
+  if (status === "running" || status === "pending") return "eval-badge-attn";
   return "eval-badge-dim";
 }
 
@@ -120,4 +137,53 @@ export function skillUseText(
   if (facts.used === true) return l("skill was used", "使用了该 Skill");
   if (facts.used === false) return l("skill went unused", "未使用该 Skill");
   return l("skill use is not observable", "无法观测是否使用");
+}
+
+/**
+ * What a port carries, in words.
+ *
+ * The engine's port names — `task`, `artifact`, `trajectory` — are identifiers, and
+ * showing them raw asked the reader to know the engine. Labelled by kind rather
+ * than by name so the same thing reads the same way wherever it appears.
+ */
+const PORT_LABELS: Record<string, [string, string]> = {
+  "eval.task": ["Case", "用例"],
+  "eval.artifact": ["Output", "产物"],
+  "eval.trajectory": ["Trajectory", "轨迹"],
+  "eval.instructions": ["Skill text", "Skill 说明"],
+  "eval.execution_ref": ["Run id", "运行标识"],
+};
+
+const PORT_HINTS: Record<string, [string, string]> = {
+  "eval.task": [
+    "The case being evaluated: its input, its expected output and any context.",
+    "当前被评测的用例：输入、期望输出，以及上下文。",
+  ],
+  "eval.artifact": [
+    "What the model produced: the answer, and any files that came with it.",
+    "模型产出的东西：答案，以及随带的文件。",
+  ],
+  "eval.trajectory": [
+    "How the work was done: turns, tool calls, failures, tokens.",
+    "做事的过程：轮次、工具调用、失败次数、token。",
+  ],
+  "eval.instructions": [
+    "The Skill text handed to the model with the task.",
+    "随任务一起交给模型的 Skill 说明。",
+  ],
+  "eval.execution_ref": [
+    "The runtime's own id for the run, used to find its session.",
+    "运行时给这次运行的标识，用来找到对应会话。",
+  ],
+};
+
+export function portLabel(language: LanguageMode, kind: string, name: string): string {
+  const label = PORT_LABELS[kind];
+  return label ? localize(language, label[0], label[1]) : name;
+}
+
+/** The tooltip on a port: what it carries, not what it is called. */
+export function portHint(language: LanguageMode, kind: string): string {
+  const hint = PORT_HINTS[kind];
+  return hint ? localize(language, hint[0], hint[1]) : kind;
 }

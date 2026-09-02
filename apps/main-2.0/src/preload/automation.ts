@@ -116,6 +116,8 @@ export function createAutomationApi(ipc: AutomationIpcRenderer) {
     listEvaluationRuns: (request?: ListEvaluationRunsRequest): Promise<EvaluationRunPage> => ipc.invoke(AUTOMATION_CHANNELS.evaluationRunList, request),
     getEvaluationRun: (runId: string): Promise<EvaluationRun | undefined> => ipc.invoke(AUTOMATION_CHANNELS.evaluationRunGet, runId),
     deleteEvaluationRun: (runId: string): Promise<boolean> => ipc.invoke(AUTOMATION_CHANNELS.evaluationRunDelete, runId),
+    openEvaluationArtifactFile: (runId: string, resultId: string): Promise<string> =>
+      ipc.invoke(AUTOMATION_CHANNELS.evaluationArtifactOpen, { runId, resultId }),
     runEvaluationExperiment: (experimentId: string): Promise<EvaluationRun> => ipc.invoke(AUTOMATION_CHANNELS.evaluationExperimentRun, { experimentId }),
 
     getWorkflowCore: (workflowId?: string): Promise<WorkflowCoreSnapshot> => ipc.invoke(AUTOMATION_CHANNELS.workflowCoreGet, workflowId),

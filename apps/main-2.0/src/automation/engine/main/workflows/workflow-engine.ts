@@ -49,6 +49,14 @@ function runError(error: unknown): { code: string; message: string } {
   return { code: "execution_failed", message: error instanceof Error ? error.message : String(error) };
 }
 
+/** A required input must carry a value; `0` and `false` count, blank text does not. */
+function missingRequiredInput(inputs: Record<string, unknown>, key: string): boolean {
+  if (!Object.hasOwn(inputs, key)) return true;
+  const value = inputs[key];
+  if (value === undefined || value === null) return true;
+  return typeof value === "string" && value.trim().length === 0;
+}
+
 export class WorkflowEngine {
   private readonly store: WorkflowEngineStore;
   private readonly executors: WorkflowEngineOptions["executors"];
@@ -73,7 +81,7 @@ export class WorkflowEngine {
     const definitionIssues = validateWorkflowDefinition(definition);
     if (definitionIssues.length > 0) throw new Error(`Invalid Workflow definition: ${definitionIssues[0]!.path}: ${definitionIssues[0]!.message}`);
     for (const input of definition.inputs) {
-      if (input.required && (!Object.hasOwn(inputs, input.key) || inputs[input.key] === undefined)) {
+      if (input.required && missingRequiredInput(inputs, input.key)) {
         throw new Error(`Required Workflow input ${input.key} is missing.`);
       }
     }

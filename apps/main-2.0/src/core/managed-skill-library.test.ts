@@ -165,6 +165,40 @@ describe("AgentRecall bundled Skills", () => {
     expect(metadata.tags).toContain("teaching");
   });
 
+  it("ships the technical writing and diagram Skills with their complete assets", () => {
+    const definitions = [
+      {
+        id: "rewrite-technical-tutorial",
+        sourceUrl: "https://github.com/zszz3/AgentRecall/tree/main/apps/main-2.0/assets/bundled-skills/rewrite-technical-tutorial",
+      },
+      {
+        id: "feishu-tech-diagram",
+        sourceUrl: "https://github.com/zszz3/AgentRecall/tree/main/apps/main-2.0/assets/bundled-skills/feishu-tech-diagram",
+      },
+    ];
+
+    for (const definition of definitions) {
+      expect(AGENT_RECALL_BUILTIN_SKILLS).toContainEqual({
+        id: definition.id,
+        installId: definition.id,
+        sourceUrl: definition.sourceUrl,
+        categoryId: "writing",
+      });
+      const bundledSkillUrl = new URL(`../../assets/bundled-skills/${definition.id}/`, import.meta.url);
+      expect(fs.existsSync(fileURLToPath(new URL("SKILL.md", bundledSkillUrl)))).toBe(true);
+      expect(fs.existsSync(fileURLToPath(new URL("agents/openai.yaml", bundledSkillUrl)))).toBe(true);
+    }
+
+    const diagramUrl = new URL("../../assets/bundled-skills/feishu-tech-diagram/", import.meta.url);
+    const templateSpecs = JSON.parse(
+      fs.readFileSync(fileURLToPath(new URL("references/template-specs.json", diagramUrl)), "utf8"),
+    ) as unknown[];
+    expect(templateSpecs).toHaveLength(66);
+    const samples = fs.readdirSync(fileURLToPath(new URL("assets/samples/", diagramUrl)));
+    expect(samples.filter((entry) => entry.endsWith(".svg"))).toHaveLength(66);
+    expect(fs.existsSync(fileURLToPath(new URL("tests/validate_assets.py", diagramUrl)))).toBe(true);
+  });
+
   it("ships the adapted DeepSeek Harness quality Skills with their licenses", () => {
     const skills = [
       { id: "dsh-code-review", categoryId: "coding" },
@@ -212,10 +246,22 @@ describe("AgentRecall bundled Skills", () => {
       label: "AgentRecall",
       url: "https://github.com/deepseek-ai/deepseek-harness/tree/master/.agents/skills/dsh-trim-cot-leakage",
     });
+    expect(library.list().skills.find((skill) => skill.managedId === "rewrite-technical-tutorial")?.origin).toEqual({
+      kind: "builtin",
+      label: "AgentRecall",
+      url: "https://github.com/zszz3/AgentRecall/tree/main/apps/main-2.0/assets/bundled-skills/rewrite-technical-tutorial",
+    });
+    expect(library.list().skills.find((skill) => skill.managedId === "feishu-tech-diagram")?.origin).toEqual({
+      kind: "builtin",
+      label: "AgentRecall",
+      url: "https://github.com/zszz3/AgentRecall/tree/main/apps/main-2.0/assets/bundled-skills/feishu-tech-diagram",
+    });
     expect(library.list().skills.find((skill) => skill.managedId === "aihot")?.categoryId).toBe("explore");
     expect(library.list().skills.find((skill) => skill.managedId === "resume-optimization")?.categoryId).toBe("writing");
     expect(library.list().skills.find((skill) => skill.managedId === "dsh-code-review")?.categoryId).toBe("coding");
     expect(library.list().skills.find((skill) => skill.managedId === "dsh-trim-cot-leakage")?.categoryId).toBe("writing");
+    expect(library.list().skills.find((skill) => skill.managedId === "rewrite-technical-tutorial")?.categoryId).toBe("writing");
+    expect(library.list().skills.find((skill) => skill.managedId === "feishu-tech-diagram")?.categoryId).toBe("writing");
   });
 
   it("adds the current category to existing built-in metadata without re-importing the Skill", () => {

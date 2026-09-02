@@ -13,8 +13,10 @@ import type { WorkflowNodeExecutor } from "./workflow-engine";
 
 export interface WorkflowAgentInvoker {
   invoke(input: {
+    workflowId: string;
     runId: string;
     nodeId: string;
+    node: WorkflowAgentNode | WorkflowReviewNode;
     agentId: string;
     prompt: string;
     outputs: WorkflowOutputField[];
@@ -82,8 +84,10 @@ function createAgentExecutor<N extends WorkflowAgentNode | WorkflowReviewNode>(
 
       const key = executionKey(run.id, node.id);
       const promise = Promise.resolve().then(() => agentInvoker.invoke({
+        workflowId: run.workflowId,
         runId: run.id,
         nodeId: node.id,
+        node: structuredClone(node),
         agentId: node.agentId,
         prompt: assembleWorkflowNodePrompt({
           definition: run.definition,

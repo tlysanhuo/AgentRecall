@@ -169,6 +169,7 @@ describe("createAutomationApi", () => {
     await api.listEvaluationRuns({ experimentId: "experiment-1", limit: 25 });
     await api.getEvaluationRun("run-1");
     await api.deleteEvaluationRun("run-1");
+    await api.openEvaluationArtifactFile("run-1", "result-1");
     await api.runEvaluationExperiment("experiment-1");
 
     expect(ipc.invoke.mock.calls).toEqual([
@@ -184,6 +185,7 @@ describe("createAutomationApi", () => {
       [AUTOMATION_CHANNELS.evaluationRunList, { experimentId: "experiment-1", limit: 25 }],
       [AUTOMATION_CHANNELS.evaluationRunGet, "run-1"],
       [AUTOMATION_CHANNELS.evaluationRunDelete, "run-1"],
+      [AUTOMATION_CHANNELS.evaluationArtifactOpen, { runId: "run-1", resultId: "result-1" }],
       [AUTOMATION_CHANNELS.evaluationExperimentRun, { experimentId: "experiment-1" }],
     ]);
   });

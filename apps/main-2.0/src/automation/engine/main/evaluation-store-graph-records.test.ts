@@ -88,10 +88,18 @@ describe("PostgreSQL evaluation store graph records", () => {
           ],
           byLabel: { dimension: { 正确性: 0.9 }, priority: { must: 0.9 } },
           skippedEvaluatorIds: ["tool-failures"],
+          artifact: {
+            origin: { kind: "agent_run", reference: "claude:thread-9" },
+            files: [
+              { path: "src/a.ts", status: "added" },
+              { path: "src/b.ts", status: "modified" },
+            ],
+          },
           sessionKey: "claude:thread-9",
           skillInjection: { skillName: "review", skillHash: "hash-1", contentLength: 42 },
           scores: [
             { evaluatorId: "exact", score: 1, passed: true, dimension: "正确性", durationMs: 1 },
+            { evaluatorId: "exact", score: 0.8, passed: true, dimension: "格式", durationMs: 1 },
           ],
           nodes: [
             {
@@ -181,8 +189,17 @@ describe("PostgreSQL evaluation store graph records", () => {
       byLabel: { dimension: { 正确性: 0.9 }, priority: { must: 0.9 } },
       skippedEvaluatorIds: ["tool-failures"],
     });
+    // What the run produced, not only what it said: a judge written next week has
+    // to be able to read last week's files without running the agent again.
+    expect(result!.artifact).toEqual({
+      origin: { kind: "agent_run", reference: "claude:thread-9" },
+      files: [
+        { path: "src/a.ts", status: "added" },
+        { path: "src/b.ts", status: "modified" },
+      ],
+    });
     expect(result!.dimensions).toEqual(graphRun().results[0]!.dimensions);
-    expect(result!.scores[0]!.dimension).toBe("正确性");
+    expect(result!.scores.map((score) => score.dimension)).toEqual(["格式", "正确性"]);
     expect(result!.nodes?.map((node) => node.nodeId)).toEqual([
       "agent",
       "session",
@@ -203,6 +220,31 @@ describe("PostgreSQL evaluation store graph records", () => {
       pendingReason: "upstream_not_pass",
       pendingUpstream: ["evidence"],
     });
+  });
+
+  it("leaves a case without an artifact without one", async () => {
+    // An empty file list and an unobserved one are different answers, and only a
+    // missing artifact means the source never produced anything to judge.
+    const run = graphRun();
+    delete run.results[0]!.artifact;
+    await store.saveRun(run);
+
+    const loaded = await store.getRun("run-1");
+
+    expect(loaded!.results[0]!.artifact).toBeUndefined();
+  });
+
+  it("keeps an artifact that was produced but touched no files", async () => {
+    const run = graphRun();
+    run.results[0]!.artifact = { origin: { kind: "folder", reference: "/tmp/out" } };
+    await store.saveRun(run);
+
+    const loaded = await store.getRun("run-1");
+
+    expect(loaded!.results[0]!.artifact).toEqual({
+      origin: { kind: "folder", reference: "/tmp/out" },
+    });
+    expect(loaded!.results[0]!.artifact!.files).toBeUndefined();
   });
 
   it("replaces the previous node records when a run snapshot is saved again", async () => {
