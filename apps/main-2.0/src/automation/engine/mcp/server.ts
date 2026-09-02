@@ -866,10 +866,54 @@ async function handleJsonRpc(request: JsonRpcRequest): Promise<void> {
   }
 }
 
-export function startStdioMcpServer(): void {
+const STDIO_MCP_SHUTDOWN_DRAIN_MS = 5_000;
+
+export interface StdioMcpServerOptions {
+  stdin?: NodeJS.ReadableStream & { readableEnded: boolean; destroyed: boolean };
+  stdout?: NodeJS.WritableStream;
+  signalTarget?: { on(signal: NodeJS.Signals, listener: () => void): unknown };
+  exit?: (code: number) => void;
+  drainMs?: number;
+}
+
+function shutdownDrainMsFromEnvironment(): number {
+  const raw = process.env.AGENT_RECALL_MCP_SHUTDOWN_DRAIN_MS?.trim();
+  if (!raw) return STDIO_MCP_SHUTDOWN_DRAIN_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : STDIO_MCP_SHUTDOWN_DRAIN_MS;
+}
+
+export function startStdioMcpServer(options: StdioMcpServerOptions = {}): void {
+  const stdin = options.stdin ?? process.stdin;
+  const stdout = options.stdout ?? process.stdout;
+  const signalTarget = options.signalTarget ?? process;
+  const exit = options.exit ?? ((code: number) => process.exit(code));
+  const drainMs = options.drainMs ?? shutdownDrainMsFromEnvironment();
   let buffer = "";
-  process.stdin.setEncoding("utf8");
-  process.stdin.on("data", (chunk: string) => {
+  let inFlightRequests = 0;
+  let shutdownReason: string | null = null;
+  let exited = false;
+  const exitOnce = (code: number) => {
+    if (exited) return;
+    exited = true;
+    exit(code);
+  };
+  const shutdown = (reason: string) => {
+    if (shutdownReason !== null) return;
+    shutdownReason = reason;
+    if (inFlightRequests <= 0) {
+      exitOnce(0);
+      return;
+    }
+    // The host is already gone; give in-flight requests a bounded window to
+    // write their last responses, then stop instead of leaking the process.
+    const drainTimer = setTimeout(() => exitOnce(0), drainMs);
+    drainTimer.unref();
+  };
+
+  stdin.setEncoding("utf8");
+  stdin.on("data", (chunk: string) => {
+    if (shutdownReason !== null) return;
     buffer += chunk;
     while (true) {
       const newlineIndex = buffer.indexOf("\n");
@@ -877,7 +921,20 @@ export function startStdioMcpServer(): void {
       const line = buffer.slice(0, newlineIndex).trim();
       buffer = buffer.slice(newlineIndex + 1);
       if (!line) continue;
-      void handleJsonRpc(JSON.parse(line) as JsonRpcRequest);
+      inFlightRequests += 1;
+      void handleJsonRpc(JSON.parse(line) as JsonRpcRequest).finally(() => {
+        inFlightRequests -= 1;
+        if (shutdownReason !== null && inFlightRequests <= 0) exitOnce(0);
+      });
     }
   });
+  // Hosts release stdio MCP servers by closing the pipes; without these
+  // handlers the gateway/workflow entries outlive their client (issue #499).
+  stdin.on("end", () => shutdown("stdin end"));
+  stdin.on("close", () => shutdown("stdin close"));
+  stdin.on("error", () => shutdown("stdin error"));
+  stdout.on("error", () => shutdown("stdout error"));
+  signalTarget.on("SIGTERM", () => shutdown("SIGTERM"));
+  signalTarget.on("SIGINT", () => shutdown("SIGINT"));
+  if (stdin.readableEnded || stdin.destroyed) shutdown("stdin already closed");
 }
