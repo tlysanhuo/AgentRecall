@@ -20,6 +20,23 @@ const originalExecutionId = process.env.AGENT_RECALL_WORKFLOW_NODE_EXECUTION_ID;
 const originalReviewRevision = process.env.AGENT_RECALL_WORKFLOW_REVIEW_REVISION;
 const originalScope = process.env.AGENT_RECALL_WORKFLOW_MCP_SCOPE;
 const originalMode = process.env.AGENT_RECALL_MCP_MODE;
+
+async function killAndWaitForExit(child: ReturnType<typeof spawn>): Promise<void> {
+  if (child.exitCode === null && child.signalCode === null && !child.killed) child.kill();
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>((resolve) => {
+    // Bounded so a stubborn child cannot hang the suite on top of a failure.
+    const timer = setTimeout(resolve, 2_000);
+    child.once("close", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.once("error", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
 describe("MCP server tools", () => {
   afterEach(() => {
     if (originalEnv === undefined) delete process.env.AGENT_RECALL_WORKFLOW_MCP_BRIDGE;
@@ -342,32 +359,36 @@ describe("MCP server tools", () => {
       env: { ...process.env, AGENT_RECALL_WORKFLOW_MCP_BRIDGE: path.join(os.tmpdir(), "missing-mcp-bridge.json"), AGENT_RECALL_WORKFLOW_MCP_TOKEN: "" },
       stdio: ["pipe", "pipe", "pipe"],
     });
-    const response = await new Promise<Record<string, any>>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("MCP stdio response timed out")), 5_000);
-      let output = "";
-      child.stdout.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => {
-        output += chunk;
-        const newlineIndex = output.indexOf("\n");
-        if (newlineIndex < 0) return;
-        clearTimeout(timer);
-        resolve(JSON.parse(output.slice(0, newlineIndex)));
+    try {
+      const response = await new Promise<Record<string, any>>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("MCP stdio response timed out")), 5_000);
+        let output = "";
+        child.stdout.setEncoding("utf8");
+        child.stdout.on("data", (chunk: string) => {
+          output += chunk;
+          const newlineIndex = output.indexOf("\n");
+          if (newlineIndex < 0) return;
+          clearTimeout(timer);
+          resolve(JSON.parse(output.slice(0, newlineIndex)));
+        });
+        child.once("error", reject);
+        child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })}\n`);
       });
-      child.once("error", reject);
-      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })}\n`);
-    });
-    expect(response.result.tools.length).toBeGreaterThan(0);
+      expect(response.result.tools.length).toBeGreaterThan(0);
 
-    child.stdin.end();
-    const exitCode = await new Promise<number | null>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("MCP stdio server outlived closed stdin")), 5_000);
-      child.once("exit", (code) => {
-        clearTimeout(timer);
-        resolve(code);
+      child.stdin.end();
+      const exitCode = await new Promise<number | null>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("MCP stdio server outlived closed stdin")), 5_000);
+        child.once("exit", (code) => {
+          clearTimeout(timer);
+          resolve(code);
+        });
+        child.once("error", reject);
       });
-      child.once("error", reject);
-    });
-    expect(exitCode).toBe(0);
+      expect(exitCode).toBe(0);
+    } finally {
+      await killAndWaitForExit(child);
+    }
   });
 
   test("gateway stdio server exits after the host closes stdin", async () => {
@@ -378,32 +399,36 @@ describe("MCP server tools", () => {
       env: { ...process.env, AGENT_RECALL_MCP_BRIDGE: path.join(os.tmpdir(), "missing-mcp-bridge.json") },
       stdio: ["pipe", "pipe", "pipe"],
     });
-    const response = await new Promise<Record<string, any>>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Gateway stdio response timed out")), 5_000);
-      let output = "";
-      child.stdout.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => {
-        output += chunk;
-        const newlineIndex = output.indexOf("\n");
-        if (newlineIndex < 0) return;
-        clearTimeout(timer);
-        resolve(JSON.parse(output.slice(0, newlineIndex)));
+    try {
+      const response = await new Promise<Record<string, any>>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("Gateway stdio response timed out")), 5_000);
+        let output = "";
+        child.stdout.setEncoding("utf8");
+        child.stdout.on("data", (chunk: string) => {
+          output += chunk;
+          const newlineIndex = output.indexOf("\n");
+          if (newlineIndex < 0) return;
+          clearTimeout(timer);
+          resolve(JSON.parse(output.slice(0, newlineIndex)));
+        });
+        child.once("error", reject);
+        child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })}\n`);
       });
-      child.once("error", reject);
-      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })}\n`);
-    });
-    expect(response.result.tools.length).toBeGreaterThan(0);
+      expect(response.result.tools.length).toBeGreaterThan(0);
 
-    child.stdin.end();
-    const exitCode = await new Promise<number | null>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Gateway stdio server outlived closed stdin")), 5_000);
-      child.once("exit", (code) => {
-        clearTimeout(timer);
-        resolve(code);
+      child.stdin.end();
+      const exitCode = await new Promise<number | null>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("Gateway stdio server outlived closed stdin")), 5_000);
+        child.once("exit", (code) => {
+          clearTimeout(timer);
+          resolve(code);
+        });
+        child.once("error", reject);
       });
-      child.once("error", reject);
-    });
-    expect(exitCode).toBe(0);
+      expect(exitCode).toBe(0);
+    } finally {
+      await killAndWaitForExit(child);
+    }
   });
 
   test("drains in-flight requests before exiting on stdin close", async () => {
@@ -583,7 +608,7 @@ describe("MCP server tools", () => {
       });
       expect(exitCode).toBe(0);
     } finally {
-      child.kill();
+      await killAndWaitForExit(child);
       // The blackhole never ends its accepted sockets, so plain close() would
       // wait forever for the half-open connection; drop them explicitly.
       for (const socket of blackholeSockets) socket.destroy();
