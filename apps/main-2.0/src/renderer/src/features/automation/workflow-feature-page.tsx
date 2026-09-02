@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { Activity, ArrowLeft, Bot, Braces, CirclePause, Code2, Copy, File, FolderOpen, GitBranch, Hash, History, LayoutTemplate, List, Pause, Pencil, Play, Plus, RotateCcw, Save, Settings2, ShieldCheck, Square, ToggleLeft, Trash2, Type as TypeIcon, UserRound, X } from "lucide-react";
 import type {
   WorkflowDefinition,
@@ -371,19 +371,25 @@ export function WorkflowFeaturePage({
 
   const load = useCallback(async (preferId?: string) => {
     const snapshot = await api.getWorkflowCore(preferId);
-    setDefinitions(snapshot.definitions);
+    // Unsaved drafts only exist in local state; a plain snapshot overwrite
+    // would silently drop them from the list.
+    const preserved = definitions.filter(
+      (item) => newDraftIds.has(item.id) && !snapshot.definitions.some((entry) => entry.id === item.id),
+    );
+    const merged = [...preserved, ...snapshot.definitions];
+    setDefinitions(merged);
     setRuns(snapshot.runs);
-    const preferredId = preferId && snapshot.definitions.some((item) => item.id === preferId)
+    const preferredId = preferId && merged.some((item) => item.id === preferId)
       ? preferId
       : undefined;
     const nextId = preferredId
-      ?? (snapshot.definitions.some((item) => item.id === selectedId) ? selectedId : undefined)
-      ?? snapshot.definitions.find((item) => !item.isTemplate)?.id
-      ?? snapshot.definitions[0]?.id;
+      ?? (merged.some((item) => item.id === selectedId) ? selectedId : undefined)
+      ?? merged.find((item) => !item.isTemplate)?.id
+      ?? merged[0]?.id;
     setSelectedId(nextId);
-    const next = snapshot.definitions.find((item) => item.id === nextId);
+    const next = merged.find((item) => item.id === nextId);
     if (next) setDraft(structuredClone(next));
-  }, [api, selectedId]);
+  }, [api, definitions, newDraftIds, selectedId]);
 
   const createNewWorkflow = (): void => {
     const next = createWorkflowDefinition(agents[0]?.id ?? "");
@@ -431,19 +437,42 @@ export function WorkflowFeaturePage({
   ));
   useEffect(() => {
     if (!controllableRun || (controllableRun.status !== "running" && controllableRun.status !== "waiting")) return;
-    const timer = window.setInterval(() => void load(selectedId).catch(() => undefined), 1200);
+    // Poll only run state: a full load would overwrite the definition draft
+    // the user may be editing while the run is in progress.
+    const timer = window.setInterval(() => {
+      void api.getWorkflowCore(selectedId)
+        .then((snapshot) => setRuns(snapshot.runs))
+        .catch(() => undefined);
+    }, 1200);
     return () => window.clearInterval(timer);
-  }, [controllableRun?.id, controllableRun?.status, load, selectedId]);
+  }, [controllableRun?.id, controllableRun?.status, api, selectedId]);
+  // Auto-open one useful node once per selected run. Re-asserting on every
+  // cleared selection would make the inspector bounce back after it is closed.
+  const autoSelectedRunId = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (mode !== "run" || selectedNodeId || !selectedRun) return;
+    if (mode !== "run" || !selectedRun) return;
+    if (autoSelectedRunId.current === selectedRun.id) return;
+    if (selectedNodeId) {
+      autoSelectedRunId.current = selectedRun.id;
+      return;
+    }
     const focusNode = selectedRun.definition.nodes.find((node) => {
       const status = selectedRun.nodeRuns[node.id]?.status;
       return status === "running" || status === "waiting" || status === "failed";
     }) ?? [...selectedRun.definition.nodes].reverse().find((node) => (
       selectedRun.nodeRuns[node.id]?.status === "completed"
     ));
-    if (focusNode) setSelectedNodeId(focusNode.id);
+    if (!focusNode) return;
+    autoSelectedRunId.current = selectedRun.id;
+    setSelectedNodeId(focusNode.id);
   }, [selectedRun, mode, selectedNodeId]);
+  // Keep the list entry of an unsaved draft current with the editor, so
+  // switching to another workflow and back restores the latest edits
+  // instead of the skeleton captured at creation time.
+  useEffect(() => {
+    if (!draft || !newDraftIds.has(draft.id)) return;
+    setDefinitions((current) => current.map((item) => (item.id === draft.id ? draft : item)));
+  }, [draft, newDraftIds]);
 
   const issues = draft ? validateWorkflowDefinition(draft, new Set(agents.map((agent) => agent.id))) : [];
   const templates = definitions.filter((definition) => definition.isTemplate);

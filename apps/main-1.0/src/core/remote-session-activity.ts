@@ -19,6 +19,25 @@ CLAUDE_SESSION_START_SKEW_MS = 2 * 60 * 1000
 READ_CHUNK_SIZE = 64 * 1024
 SESSION_ID_PATTERN = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$", re.IGNORECASE)
 proc_root = Path(os.environ.get("AGENT_RECALL_PROC_ROOT", "/proc"))
+codex_sessions_root = Path.home() / ".codex" / "sessions"
+claude_projects_root = Path.home() / ".claude" / "projects"
+
+def resolved_path(value):
+  try:
+    return Path(value).resolve()
+  except Exception:
+    return None
+
+def path_is_within(value, root):
+  candidate = resolved_path(value)
+  boundary = resolved_path(root)
+  if candidate is None or boundary is None:
+    return False
+  try:
+    candidate.relative_to(boundary)
+    return True
+  except (ValueError, OSError):
+    return False
 
 def normalized_executable(token):
   name = token.replace("\\", "/").rsplit("/", 1)[-1].lower()
@@ -150,9 +169,55 @@ def process_started_at_ms(pid):
   except Exception:
     return None
 
+def codex_session_id(file_name):
+  normalized = file_name.replace("\\", "/")
+  if not normalized.lower().endswith(".jsonl") or not path_is_within(file_name, codex_sessions_root):
+    return None
+  match = SESSION_ID_PATTERN.search(normalized)
+  return match.group(1) if match else None
+
+def codex_session_candidates(pid):
+  candidates = []
+  for file_name in open_files(pid):
+    raw_id = codex_session_id(file_name)
+    if not raw_id:
+      continue
+    try:
+      modified_at = Path(file_name).stat().st_mtime
+    except Exception:
+      modified_at = 0
+    candidates.append((modified_at, file_name, raw_id))
+  return candidates
+
+def is_codex_desktop_process(token):
+  lower = token.replace("\\", "/").lower()
+  if "/.codex/computer-use/" in lower:
+    return True
+  return ".app/contents/" in lower and "/contents/resources/codex" not in lower
+
+def is_plain_codex_command(tokens, command_index, args):
+  if command_index != 0:
+    return False
+  token = tokens[command_index]
+  if normalized_executable(token) != "codex" or is_codex_desktop_process(token):
+    return False
+  if "resume" in args or "app-server" in args:
+    return False
+  return True
+
+def claude_process_session_id(pid):
+  metadata_path = Path.home() / ".claude" / "sessions" / (str(pid) + ".json")
+  try:
+    value = json.loads(metadata_path.read_text(encoding="utf-8"))
+  except Exception:
+    return None
+  raw_id = value.get("sessionId") if isinstance(value, dict) else None
+  normalized = raw_id.strip() if isinstance(raw_id, str) else ""
+  return normalized or None
+
 def claude_session_id(file_name):
   normalized = file_name.replace("\\", "/")
-  if "/.claude/projects/" not in normalized or not normalized.lower().endswith(".jsonl"):
+  if not normalized.lower().endswith(".jsonl") or not path_is_within(file_name, claude_projects_root):
     return None
   raw_id = normalized.rsplit("/", 1)[-1][:-len(".jsonl")].strip()
   if "/subagents/" in normalized:
@@ -248,12 +313,16 @@ for pid, tokens in process_rows():
         if raw_id and not raw_id.startswith("-"):
           emit_session("codex", raw_id, pid)
     if "app-server" in args:
-      for file_name in open_files(pid):
-        if "/.codex/sessions/" not in file_name.replace("\\", "/"):
-          continue
-        match = SESSION_ID_PATTERN.search(file_name)
-        if match and agent_is_working(Path(file_name)):
-          emit_session("codex", match.group(1), pid)
+      candidates = codex_session_candidates(pid)
+      for _, file_name, raw_id in candidates:
+        if agent_is_working(Path(file_name)):
+          emit_session("codex", raw_id, pid)
+    elif is_plain_codex_command(tokens, command_index, args):
+      candidates = codex_session_candidates(pid)
+      if candidates:
+        working = [candidate for candidate in candidates if agent_is_working(Path(candidate[1]))]
+        _, _, raw_id = max(working or candidates)
+        emit_session("codex", raw_id, pid)
 
   command_index = claude_command_index(tokens)
   if command_index is None:
@@ -262,6 +331,10 @@ for pid, tokens in process_rows():
   resumed_id = flag_resume_id(args)
   if resumed_id:
     emit_session("claude", resumed_id, pid)
+    continue
+  metadata_id = claude_process_session_id(pid)
+  if metadata_id:
+    emit_session("claude", metadata_id, pid)
     continue
   open_session_ids = [raw_id for raw_id in (claude_session_id(file_name) for file_name in open_files(pid)) if raw_id]
   if open_session_ids:

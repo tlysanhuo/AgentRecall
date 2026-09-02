@@ -3,6 +3,7 @@ import {
   loadClaudeCliSessionRows,
   loadCodeBuddyCliSessionRows,
   loadCodeWizSessions,
+  loadOpenCodeSessions,
   loadCodexSessionRows,
   loadQoderSessionRows,
   parseCodexSessionMetaLine,
@@ -25,6 +26,7 @@ export type RemoteSessionFileKind =
   | "claude-session-index"
   | "codebuddy-project"
   | "codewiz-session"
+  | "opencode-session"
   | "qoder-project";
 
 export interface RemoteSessionFilePayload {
@@ -131,6 +133,12 @@ export function loadRemoteSessionDetailPayload(
     const [dbPath, sessionId] = payload.path.split("#", 2);
     const candidate = loadCodeWizSessions(path.dirname(dbPath)).find((item) => item.session.rawId === sessionId);
     return candidate ? scopeRemoteSession(candidate, environment, "codewiz") : null;
+  }
+
+  if (payload.kind === "opencode-session") {
+    const [dbPath, sessionId] = payload.path.split("#", 2);
+    const candidate = loadOpenCodeSessions(path.dirname(dbPath)).find((item) => item.session.rawId === sessionId);
+    return candidate ? scopeRemoteSession(candidate, environment, "opencode-cli") : null;
   }
 
   return null;

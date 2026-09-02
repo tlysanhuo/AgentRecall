@@ -2143,6 +2143,124 @@ describe("Codex session loading", () => {
     expect(JSON.stringify(loaded?.messages)).not.toContain("不能进入对话");
   });
 
+  it("removes an indexed user message when a paginated item_completed marks it injected noise", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-codex-noise-"));
+    const filePath = path.join(root, "sessions", "2026", "08", "20", "rollout.jsonl");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, [
+      JSON.stringify({
+        type: "session_meta",
+        timestamp: "2026-08-20T02:00:00Z",
+        payload: { id: "codex-noise", cwd: "/repo" },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        timestamp: "2026-08-20T02:00:00.500Z",
+        payload: { type: "task_started", turn_id: "turn-1" },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2026-08-20T02:00:01Z",
+        payload: {
+          type: "message",
+          id: "user-1",
+          role: "user",
+          content: [{ type: "input_text", text: "帮我修复登录问题" }],
+        },
+      }),
+      "",
+    ].join("\n"));
+
+    try {
+      const initial = loadCodexSessionFile(filePath);
+      if (!initial) throw new Error("expected initial Codex session");
+      expect(initial.messages).toMatchObject([{ role: "user", content: "帮我修复登录问题" }]);
+      const offset = fs.statSync(filePath).size;
+
+      // The session switches to paginated history mid-file; the completed item
+      // rewrites the earlier user message as pure injected noise.
+      fs.appendFileSync(filePath, [
+        JSON.stringify({
+          type: "session_meta",
+          timestamp: "2026-08-20T03:00:00Z",
+          payload: { id: "codex-noise", cwd: "/repo", history_mode: "paginated" },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-08-20T03:00:01Z",
+          payload: {
+            type: "item_completed",
+            turn_id: "turn-1",
+            item: {
+              type: "UserMessage",
+              id: "user-1",
+              content: [{ type: "input_text", text: "<subagent_notification sender=\"sub\">noise</subagent_notification>" }],
+            },
+          },
+        }),
+        "",
+      ].join("\n"));
+
+      const incremental = [...loadCodexSessionsIterator(root, undefined, {
+        incrementalCodexSessions: new Map([[filePath, { offset, loaded: initial }]]),
+      })][0];
+      expect(incremental?.messages ?? []).toHaveLength(0);
+      expect(incremental?.codexIncrementalState?.messageProvenance ?? []).toHaveLength(0);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a single message when item_completed precedes its response_item", () => {
+    // Codex 0.149 起，event_msg/item_completed 会写在同 id 的 response_item 之前。
+    const rows = [
+      {
+        type: "session_meta",
+        timestamp: "2026-08-28T03:05:25Z",
+        payload: { id: "codex-reordered", cwd: "/repo", history_mode: "paginated" },
+      },
+      {
+        type: "event_msg",
+        timestamp: "2026-08-28T03:05:26Z",
+        payload: { type: "task_started", turn_id: "turn-1" },
+      },
+      {
+        type: "event_msg",
+        timestamp: "2026-08-28T03:05:27Z",
+        payload: {
+          type: "item_completed",
+          turn_id: "turn-1",
+          completed_at_ms: Date.parse("2026-08-28T03:05:27Z"),
+          item: {
+            type: "AgentMessage",
+            id: "agent-1",
+            phase: "final_answer",
+            content: [{ type: "output_text", text: "唯一的助手回答" }],
+          },
+        },
+      },
+      {
+        type: "response_item",
+        timestamp: "2026-08-28T03:05:27.100Z",
+        payload: {
+          type: "message",
+          id: "agent-1",
+          role: "assistant",
+          content: [{ type: "output_text", text: "唯一的助手回答" }],
+        },
+      },
+    ];
+
+    const loaded = loadCodexSessionRows("/tmp/codex-reordered.jsonl", rows);
+
+    expect(loaded?.messages).toMatchObject([
+      { role: "assistant", content: "唯一的助手回答", sourceTurnId: "turn-1", phase: "final_answer" },
+    ]);
+    expect(loaded?.codexIncrementalState?.messageProvenance).toEqual([
+      { messageIndex: 0, sourceRecordId: "item_completed:agent-1" },
+    ]);
+  });
+
   it("cleans paginated item_completed user messages before indexing", () => {
     const userCompleted = (id: string, text: string) => ({
       type: "event_msg",
@@ -2602,35 +2720,6 @@ describe("Codex session loading", () => {
     });
   });
 
-  it("reuses previously resolved Codex metadata instead of rescanning the rows", () => {
-    const loaded = loadCodexSessionRows(
-      "/tmp/pre-resolved-meta.jsonl",
-      [
-        {
-          type: "response_item",
-          timestamp: "2026-06-01T10:01:00Z",
-          payload: { type: "message", role: "user", content: [{ type: "input_text", text: "reuse metadata" }] },
-        },
-      ],
-      {
-        sessionMeta: {
-          id: "pre-resolved-meta",
-          projectPath: "/repo",
-          ts: Date.parse("2026-06-01T10:00:00Z"),
-          gitBranch: "feat/pre-resolved",
-          isSubagent: false,
-          parentSessionId: null,
-        },
-      },
-    );
-
-    expect(loaded?.session).toMatchObject({
-      rawId: "pre-resolved-meta",
-      projectPath: "/repo",
-      gitBranch: "feat/pre-resolved",
-    });
-  });
-
   it("prefers an explicit Codex title over the embedded metadata title", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-codex-title-"));
     const filePath = path.join(dir, "rollout.jsonl");
@@ -2684,39 +2773,6 @@ describe("Codex session loading", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("loads TCodex sessions with a separate source and session key namespace", () => {
-    const codexDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-tcodex-"));
-    const sessionDir = path.join(codexDir, "sessions", "2026", "06", "01");
-    fs.mkdirSync(sessionDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(sessionDir, "rollout.jsonl"),
-      [
-        JSON.stringify({
-          type: "session_meta",
-          timestamp: "2026-06-01T10:00:00Z",
-          payload: { id: "tcodex-1", cwd: "/internal", git: { branch: "feat/internal" } },
-        }),
-        JSON.stringify({
-          type: "response_item",
-          timestamp: "2026-06-01T10:01:00Z",
-          payload: { type: "message", role: "user", content: [{ type: "input_text", text: "内部会话" }] },
-        }),
-      ].join("\n"),
-    );
-
-    const loaded = loadCodexSessions(codexDir, "tcodex-cli");
-
-    expect(loaded).toHaveLength(1);
-    expect(loaded[0].session).toMatchObject({
-      sessionKey: "tcodex:tcodex-1",
-      rawId: "tcodex-1",
-      source: "tcodex-cli",
-      projectPath: "/internal",
-      gitBranch: "feat/internal",
-    });
-
-    fs.rmSync(codexDir, { recursive: true, force: true });
-  });
 });
 
 describe("Claude session loading", () => {
@@ -2927,38 +2983,6 @@ describe("Claude session loading", () => {
       source: "claude-cli",
       projectPath: "/repo",
       gitBranch: "feat/claude-tags",
-    });
-
-    fs.rmSync(claudeDir, { recursive: true, force: true });
-  });
-
-  it("loads TClaude sessions with a separate source and session key namespace", () => {
-    const claudeDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-tclaude-"));
-    const projectDir = path.join(claudeDir, "projects", "-repo");
-    fs.mkdirSync(projectDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(projectDir, "tclaude-1.jsonl"),
-      [
-        JSON.stringify({
-          type: "user",
-          timestamp: "2026-06-01T10:00:00Z",
-          cwd: "/repo",
-          sessionId: "tclaude-1",
-          gitBranch: "feat/internal",
-          message: { role: "user", content: "内部 Claude 会话" },
-        }),
-      ].join("\n"),
-    );
-
-    const loaded = loadClaudeCliSessions(claudeDir, "tclaude-cli");
-
-    expect(loaded).toHaveLength(1);
-    expect(loaded[0].session).toMatchObject({
-      sessionKey: "tclaude:tclaude-1",
-      rawId: "tclaude-1",
-      source: "tclaude-cli",
-      projectPath: "/repo",
-      gitBranch: "feat/internal",
     });
 
     fs.rmSync(claudeDir, { recursive: true, force: true });

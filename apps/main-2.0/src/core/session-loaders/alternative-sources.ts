@@ -20,11 +20,13 @@ import type {
   LoadedSession,
   SessionFormat,
   SessionMessage,
+  SessionSource,
   SessionTraceEvent,
   SessionTraceKind,
   TokenUsage,
   TokenUsageEvent,
 } from "../types";
+import { loadClaudeCliSessionRows } from "./claude-cli";
 import {
   createIndexedSession,
   createTokenUsage,
@@ -738,6 +740,277 @@ export function* loadKimiSessionsIterator(
   }
 }
 
+export const GEMINI_DIR = ".gemini";
+
+function geminiContentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const parts: string[] = [];
+    for (const part of content) {
+      if (typeof part === "string") {
+        if (part) parts.push(part);
+        continue;
+      }
+      if (!isRecord(part) || Array.isArray(part)) continue;
+      const text = stringField(part, "text");
+      if (text) parts.push(text);
+    }
+    return parts.filter(Boolean).join("\n");
+  }
+  if (isRecord(content)) return geminiContentText([content]);
+  return "";
+}
+
+function geminiVisibleContent(row: Record<string, unknown>): string {
+  return geminiContentText(unknownField(row, "displayContent") || unknownField(row, "content"));
+}
+
+function geminiToolStatus(value: string): "completed" | "failed" | "aborted" | "unknown" {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return "unknown";
+  if (normalized.includes("ok") || normalized.includes("success") || normalized.includes("complete")) return "completed";
+  if (normalized.includes("cancel")) return "aborted";
+  if (normalized.includes("error") || normalized.includes("fail")) return "failed";
+  return "unknown";
+}
+
+// Gemini CLI persists enriched re-emissions under the same message id (tokens, tool
+// results), so records must be replayed into an id-keyed log before projection.
+function geminiSessionRows(filePath: string): Record<string, unknown>[] {
+  if (filePath.endsWith(".json")) {
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      if (!isRecord(parsed)) return [];
+      const messageRows = Array.isArray(parsed.messages) ? parsed.messages.filter(isRecord) : [];
+      const { messages: _messages, ...meta } = parsed;
+      return [meta, ...messageRows];
+    } catch {
+      return [];
+    }
+  }
+  return readJsonl(filePath).filter(isRecord);
+}
+
+function loadGeminiCliSessionFile(
+  filePath: string,
+  projectPath: string,
+  stat: VirtualSessionFileStat,
+  parentSessionId: string | null,
+): LoadedSession | null {
+  const rows = geminiSessionRows(filePath);
+  if (!rows.length) return null;
+  const header = rows.find((row) => typeof row.sessionId === "string") ?? rows[0];
+  const rawId = stringField(header, "sessionId") || path.basename(filePath, path.extname(filePath));
+  const activeRows: Array<{ id: string; row: Record<string, unknown> }> = [];
+  const activeIndex = new Map<string, number>();
+  let summary = stringField(header, "summary");
+  const createdMs = timestampMs(unknownField(header, "startTime"));
+
+  const upsert = (row: Record<string, unknown>): void => {
+    const type = stringField(row, "type");
+    if (type !== "user" && type !== "gemini") return;
+    const id = stringField(row, "id");
+    if (!id) return;
+    const existing = activeIndex.get(id);
+    if (existing !== undefined) {
+      activeRows[existing] = { id, row: { ...activeRows[existing].row, ...row } };
+      return;
+    }
+    activeIndex.set(id, activeRows.length);
+    activeRows.push({ id, row });
+  };
+
+  for (const row of rows) {
+    if (row === header) continue;
+    const setPatch = objectField(row, "$set");
+    if (setPatch) {
+      if ("summary" in setPatch) summary = stringField(setPatch, "summary");
+      const checkpointMessages = unknownField(setPatch, "messages");
+      if (Array.isArray(checkpointMessages)) {
+        activeRows.length = 0;
+        activeIndex.clear();
+        for (const checkpointRow of checkpointMessages) {
+          if (isRecord(checkpointRow)) upsert(checkpointRow);
+        }
+      }
+      continue;
+    }
+    const rewindTo = stringField(row, "$rewindTo");
+    if (rewindTo) {
+      const index = activeIndex.get(rewindTo);
+      if (index === undefined) {
+        activeRows.length = 0;
+        activeIndex.clear();
+      } else {
+        for (let cut = activeRows.length - 1; cut >= index; cut -= 1) activeIndex.delete(activeRows[cut].id);
+        activeRows.length = index;
+      }
+      continue;
+    }
+    upsert(row);
+  }
+
+  const messages: SessionMessage[] = [];
+  const traceDrafts: TraceEventDraft[] = [];
+  const tokenEntries = new Map<string, TokenUsageEvent>();
+  for (const { row } of activeRows) {
+    const type = stringField(row, "type");
+    const timestamp = timestampMs(row.timestamp);
+    if (type === "user") {
+      const content = geminiVisibleContent(row);
+      if (!isMeaningfulUserMessage(content)) continue;
+      messages.push(messageFromParts("user", content, timestampString(timestamp), messages.length));
+      continue;
+    }
+    const messageId = stringField(row, "id");
+    const tokens = objectField(row, "tokens");
+    if (tokens && messageId) {
+      // Gemini 的 input 已包含 cached,权威总量为 input + output + tool + thoughts。
+      const rawInput = numberField(tokens, "input");
+      const cached = Math.min(numberField(tokens, "cached"), rawInput);
+      const inputTokens = Math.max(0, rawInput - cached);
+      const outputTokens = numberField(tokens, "output") + numberField(tokens, "tool");
+      const reasoningOutputTokens = numberField(tokens, "thoughts");
+      if (rawInput > 0 || outputTokens > 0 || cached > 0 || reasoningOutputTokens > 0) {
+        putTokenEvent(tokenEntries, tokenEvent(timestamp, `gemini:${messageId}`, inputTokens, outputTokens, cached, reasoningOutputTokens));
+      }
+    }
+    const thoughts = unknownField(row, "thoughts");
+    if (Array.isArray(thoughts)) {
+      for (const thought of thoughts) {
+        let subject = "";
+        let description = "";
+        let thoughtTimestamp = timestamp;
+        if (typeof thought === "string") {
+          description = thought;
+        } else if (isRecord(thought)) {
+          subject = stringField(thought, "subject");
+          description = stringField(thought, "description");
+          thoughtTimestamp = timestampMs(thought.timestamp) || timestamp;
+        }
+        if (!subject && !description.trim()) continue;
+        traceDrafts.push({
+          kind: "event",
+          source: "gemini",
+          title: normalizeTraceTitle(subject || "thought", ""),
+          detail: stringifyDetail(description),
+          timestamp: timestampString(thoughtTimestamp),
+          callId: null,
+          eventType: "gemini.thought",
+          status: "unknown",
+        });
+      }
+    }
+    const calls = unknownField(row, "toolCalls");
+    if (Array.isArray(calls)) {
+      for (const call of calls) {
+        if (!isRecord(call)) continue;
+        const name = stringField(call, "displayName") || stringField(call, "name");
+        if (!name) continue;
+        const callId = stringField(call, "id") || null;
+        const callTimestamp = timestampMs(unknownField(call, "timestamp")) || timestamp;
+        const title = normalizeTraceTitle(name, firstStringField(call, ["description"]));
+        traceDrafts.push({
+          kind: "tool_call",
+          source: "gemini",
+          title,
+          detail: stringifyDetail(unknownField(call, "args")),
+          timestamp: timestampString(callTimestamp),
+          callId,
+          eventType: "gemini.toolCall",
+          status: "running",
+        });
+        // Gemini 的 toolCall 自带结果与终态,补配对 result 事件供 timeline 派生层闭合 span。
+        traceDrafts.push({
+          kind: "tool_result",
+          source: "gemini",
+          title,
+          detail: stringifyDetail(unknownField(call, "result")),
+          timestamp: timestampString(callTimestamp),
+          callId,
+          eventType: "gemini.toolResult",
+          status: geminiToolStatus(stringField(call, "status")),
+        });
+      }
+    }
+    const content = geminiVisibleContent(row);
+    if (!content) continue;
+    messages.push(messageFromParts("assistant", content, timestampString(timestamp), messages.length));
+  }
+
+  if (!messages.length) return null;
+  const question = firstQuestion(messages);
+  return {
+    session: createIndexedSession({
+      keyPrefix: "gemini",
+      rawId,
+      source: "gemini-cli",
+      projectPath: projectPath || filePath,
+      filePath,
+      originalTitle: summary || cleanTitle(question) || rawId,
+      firstQuestion: cleanTitle(question),
+      timestamp: createdMs || stat.mtimeMs,
+      tokenUsage: tokenUsageFromEvents([...tokenEntries.values()]),
+      stat,
+      isSubagent: parentSessionId !== null,
+      parentSessionId,
+    }),
+    messages,
+    tokenEvents: [...tokenEntries.values()],
+    traceEvents: dedupeTraceEvents(traceDrafts),
+  };
+}
+
+function geminiChatFileNameUsable(name: string): boolean {
+  if (name.includes(".tmp-") || name.includes(".unreadable-")) return false;
+  return name.endsWith(".jsonl") || name.endsWith(".json");
+}
+
+export function* loadGeminiCliSessionsIterator(root: string, options: SessionLoadOptions): Generator<LoadedSession> {
+  const tmpRoot = path.join(root, "tmp");
+  let projectDirs: string[] = [];
+  try {
+    projectDirs = fs.readdirSync(tmpRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+      .map((entry) => path.join(tmpRoot, entry.name));
+  } catch {
+    return;
+  }
+  for (const projectDir of projectDirs) {
+    let projectPath = "";
+    try {
+      projectPath = fs.readFileSync(path.join(projectDir, ".project_root"), "utf8").trim();
+    } catch {
+      projectPath = "";
+    }
+    const dependencyMtimeMs = safeStat(path.join(projectDir, ".project_root")).mtimeMs;
+    const chats = path.join(projectDir, "chats");
+    let chatEntries: fs.Dirent[] = [];
+    try {
+      chatEntries = fs.readdirSync(chats, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of chatEntries) {
+      if (entry.name.startsWith(".")) continue;
+      const childPath = path.join(chats, entry.name);
+      if (entry.isDirectory()) {
+        for (const filePath of walkJsonlFiles(childPath)) {
+          const stat = safeStat(filePath);
+          if (shouldSkipFile(options, filePath, stat, dependencyMtimeMs, "gemini-cli")) continue;
+          const loaded = loadGeminiCliSessionFile(filePath, projectPath, stat, entry.name);
+          if (loaded) yield loaded;
+        }
+      } else if (entry.isFile() && geminiChatFileNameUsable(entry.name)) {
+        const stat = safeStat(childPath);
+        if (shouldSkipFile(options, childPath, stat, dependencyMtimeMs, "gemini-cli")) continue;
+        const loaded = loadGeminiCliSessionFile(childPath, projectPath, stat, null);
+        if (loaded) yield loaded;
+      }
+    }
+  }
+}
+
 export const QWEN_DIR = ".qwen";
 
 function qwenRows(filePath: string): unknown[] {
@@ -1012,7 +1285,37 @@ export function loadQoderSessions(qoderDir = path.join(os.homedir(), QODER_DIR))
   return [...loadQoderSessionsIterator(qoderDir)];
 }
 
+/**
+ * The new Qoder stores transcripts under `projects/<slug>/`, either directly or
+ * inside a `transcript/` subdirectory; both layouts are written concurrently,
+ * so walk the tree instead of hardcoding either shape.
+ */
 export function* loadQoderSessionsIterator(qoderDir = path.join(os.homedir(), QODER_DIR), options: SessionLoadOptions = {}): Generator<LoadedSession> {
+  const projectsDir = path.join(qoderDir, "projects");
+  if (!fs.existsSync(projectsDir)) return;
+  const loaded: LoadedSession[] = [];
+  for (const filePath of walkJsonlFiles(projectsDir)) {
+    const stat = safeStat(filePath);
+    if (shouldSkipFile(options, filePath, stat)) continue;
+    const rows = readJsonl(filePath);
+    if (!isQoderProjectsTranscript(rows)) continue;
+    const session = loadClaudeCliSessionRows(filePath, rows, { source: "qoder", keyPrefix: "qoder", stat });
+    if (session?.messages.length) loaded.push(session);
+  }
+  yield* dedupeQoderExecutionTranscripts(loaded);
+}
+
+export function loadQoderIdeSessions(qoderDir = path.join(os.homedir(), QODER_DIR)): LoadedSession[] {
+  return [...loadQoderIdeSessionsIterator(qoderDir)];
+}
+
+/**
+ * The legacy Qoder IDE stored conversations under
+ * `cache/projects/<slug>/conversation-history`. Installing the new Qoder copies
+ * them into `projects`; the two trees are indexed as separate sources, so
+ * conversations that were skipped or only partially migrated stay visible.
+ */
+export function* loadQoderIdeSessionsIterator(qoderDir = path.join(os.homedir(), QODER_DIR), options: SessionLoadOptions = {}): Generator<LoadedSession> {
   const projectsDir = path.join(qoderDir, "cache", "projects");
   if (!fs.existsSync(projectsDir)) return;
   for (const projectEntry of fs.readdirSync(projectsDir, { withFileTypes: true })) {
@@ -1027,6 +1330,42 @@ export function* loadQoderSessionsIterator(qoderDir = path.join(os.homedir(), QO
       if (loaded) yield loaded;
     }
   }
+}
+
+/**
+ * A long-running Qoder task can exist twice in the `projects` layout: the
+ * canonical session file and a `*.session.execution.jsonl` run transcript.
+ * The copies share no id, so match them on first question, project path and
+ * start second; drop transcripts that duplicate a canonical session while
+ * keeping transcripts of runs that have no session file.
+ */
+function dedupeQoderExecutionTranscripts(sessions: LoadedSession[]): LoadedSession[] {
+  const canonicalKeys = new Set<string>();
+  for (const session of sessions) {
+    if (!isQoderExecutionTranscript(session.session.filePath)) canonicalKeys.add(qoderSessionDedupeKey(session));
+  }
+  return sessions.filter(
+    (session) => !isQoderExecutionTranscript(session.session.filePath) || !canonicalKeys.has(qoderSessionDedupeKey(session)),
+  );
+}
+
+function isQoderExecutionTranscript(filePath: string): boolean {
+  return filePath.endsWith(".session.execution.jsonl");
+}
+
+function qoderSessionDedupeKey(session: LoadedSession): string {
+  const start = (session.messages[0]?.timestamp ?? "").slice(0, 19);
+  return `${session.session.firstQuestion}\u0000${session.session.projectPath}\u0000${start}`;
+}
+
+/**
+ * Transcripts in the `projects` layout are Claude-Code-shaped: conversation
+ * turns are typed rows carrying a nested `message`. The legacy Qoder IDE wrote
+ * `{ role, message }` without a `type`, so requiring both fields keeps the
+ * two formats apart.
+ */
+function isQoderProjectsTranscript(rows: unknown[]): boolean {
+  return rows.some((row) => isRecord(row) && (row.type === "user" || row.type === "assistant") && isRecord(row.message));
 }
 
 function stripQoderSlugHash(slug: string): string {
@@ -1054,7 +1393,7 @@ function stripQoderWrapperTags(text: string): string {
 }
 
 function loadQoderConversationFile(filePath: string, slug: string, stat: VirtualSessionFileStat): LoadedSession | null {
-  return loadQoderSessionRows(filePath, readJsonl(filePath), { stat, slug });
+  return loadQoderSessionRows(filePath, readJsonl(filePath), { stat, slug, source: "qoder-ide" });
 }
 
 function extractQoderSlugFromPath(filePath: string): string {
@@ -1062,7 +1401,11 @@ function extractQoderSlugFromPath(filePath: string): string {
   return match?.[1] ?? path.basename(filePath);
 }
 
-export function loadQoderSessionRows(filePath: string, rows: unknown[], options: { stat: VirtualSessionFileStat; slug?: string }): LoadedSession | null {
+export function loadQoderSessionRows(
+  filePath: string,
+  rows: unknown[],
+  options: { stat: VirtualSessionFileStat; slug?: string; source?: SessionSource },
+): LoadedSession | null {
   const filteredRows = rows.filter(isRecord);
   if (filteredRows.length === 0) return null;
   const slug = options.slug ?? extractQoderSlugFromPath(filePath);
@@ -1078,12 +1421,13 @@ export function loadQoderSessionRows(filePath: string, rows: unknown[], options:
     messages.push(messageFromParts(role, content, "", messages.length));
   }
   if (messages.length === 0) return null;
+  const source = options.source ?? "qoder";
   const question = firstQuestion(messages);
   return {
     session: createIndexedSession({
-      keyPrefix: "qoder",
+      keyPrefix: source === "qoder-ide" ? "qoder-ide" : "qoder",
       rawId,
-      source: "qoder",
+      source,
       projectPath,
       filePath,
       originalTitle: cleanTitle(question) || rawId,
@@ -1594,18 +1938,32 @@ function zcodeTokenEventsFromModelUsage(
   }
 }
 
+function zcodeTaskLinkParentMap(db: import("node:sqlite").DatabaseSync): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!sqliteTableExists(db, "session_task_link")) return map;
+  if (!sqliteHasColumns(db, "session_task_link", ["child_session_id", "parent_session_id"])) return map;
+  const rows = db.prepare("SELECT child_session_id, parent_session_id FROM session_task_link").all() as Array<Record<string, unknown>>;
+  for (const row of rows) {
+    const childSessionId = stringField(row, "child_session_id");
+    const parentSessionId = stringField(row, "parent_session_id");
+    if (childSessionId && parentSessionId) map.set(childSessionId, parentSessionId);
+  }
+  return map;
+}
+
 function loadZcodeSessionRow(
   db: import("node:sqlite").DatabaseSync,
   dbPath: string,
   stat: VirtualSessionFileStat,
   session: Record<string, unknown>,
+  taskLinkParents: Map<string, string>,
 ): LoadedSession | null {
   const rawId = stringField(session, "id");
   if (!rawId) return null;
   const { messages, traceEvents, assistantMessageIds } = zcodeMessagesFromParts(db, rawId);
   const tokenEvents = zcodeTokenEventsFromModelUsage(db, rawId, assistantMessageIds);
   const question = firstQuestion(messages);
-  const parentSessionId = stringField(session, "parent_id") || null;
+  const parentSessionId = stringField(session, "parent_id") || taskLinkParents.get(rawId) || null;
   return {
     session: createIndexedSession({
       keyPrefix: "zcode",
@@ -1636,11 +1994,12 @@ export function loadZcodeSessions(zcodeDir = path.join(os.homedir(), ".zcode")):
     if (!sqliteHasColumns(db, "message", ["id", "session_id", "time_created", "data"])) return [];
     if (!sqliteHasColumns(db, "part", ["id", "message_id", "session_id", "time_created", "data"])) return [];
     const stat = zcodeDatabaseStat(dbPath);
+    const taskLinkParents = zcodeTaskLinkParentMap(db);
     const sessions = db.prepare("SELECT * FROM session ORDER BY time_updated DESC, time_created DESC, id").all() as Array<Record<string, unknown>>;
     return sessions
       .map((session) => {
         try {
-          return loadZcodeSessionRow(db, dbPath, stat, session);
+          return loadZcodeSessionRow(db, dbPath, stat, session, taskLinkParents);
         } catch {
           return null;
         }

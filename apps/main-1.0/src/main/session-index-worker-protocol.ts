@@ -17,9 +17,11 @@ export type SessionIndexWorkerLoadOptions = Pick<
   | "includePi"
   | "includeKimiCli"
   | "includeQwenCode"
+  | "includeGeminiCli"
   | "includeCursorAgent"
   | "includeTrae"
   | "includeQoder"
+  | "includeQoderIde"
   | "includeDeepSeekCli"
 >;
 

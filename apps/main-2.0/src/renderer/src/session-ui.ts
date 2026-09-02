@@ -169,6 +169,11 @@ export function supportsResumeSource(source: SessionSource): boolean {
   return sessionSourceDescriptor(source).capabilities.resume;
 }
 
+export function supportsOpenAppSource(source: SessionSource): boolean {
+  if (!isSessionSource(source)) return false;
+  return sessionSourceDescriptor(source).capabilities.openApp;
+}
+
 export function supportsMigrationSource(source: SessionSource): boolean {
   return supportedMigrationTargets(source).length > 0;
 }

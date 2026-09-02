@@ -26,9 +26,11 @@ const ALL_SOURCES = [
   "cursor-agent",
   "trae",
   "qoder",
+  "qoder-ide",
   "pi-cli",
   "kimi-cli",
   "qwen-code",
+  "gemini-cli",
   "deepseek-cli",
 ] as const satisfies readonly SessionSource[];
 
@@ -67,14 +69,26 @@ describe("session source capability registry", () => {
       "includeCursorAgent",
       "includeTrae",
       "includeQoder",
+      "includeQoderIde",
       "includePi",
       "includeKimiCli",
       "includeQwenCode",
+      "includeGeminiCli",
       "includeDeepSeekCli",
     ]);
     expect(sessionSourceDescriptor("tclaude-cli")).toMatchObject({ liveFamily: "tclaude", migrationAgent: "claude" });
     expect(sessionSourceDescriptor("tcodex-cli")).toMatchObject({ liveFamily: "tcodex", migrationAgent: "codex" });
     expect(sessionSourceDescriptor("qoder")).toMatchObject({ format: "qoder", liveFamily: "qoder", remoteFamily: "qoder" });
+    expect(sessionSourceDescriptor("qoder-ide")).toMatchObject({
+      label: "Qoder IDE",
+      format: "qoder",
+      family: "qoder-ide",
+      optionalSetting: "includeQoderIde",
+      pendingKey: "qoder-ide",
+      liveFamily: null,
+      remoteFamily: null,
+      capabilities: { live: false, resume: false, migrate: false, sessionSync: false, openApp: false },
+    });
     expect(sessionSourceDescriptor("hermes")).toMatchObject({
       migrationAgent: null,
       capabilities: { live: true, resume: false, migrate: false, sessionSync: true, openApp: false },

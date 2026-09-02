@@ -24,6 +24,7 @@ import {
   KIMI_LEGACY_DIR,
   PI_SESSIONS_DIR,
   QODER_DIR,
+  GEMINI_DIR,
   QWEN_DIR,
   TRAE_DIR_NAMES,
   loadCodeWizSessions,
@@ -34,14 +35,25 @@ import {
   loadOpenCodeSessions,
   loadPiSessionsIterator,
   loadKimiSessionsIterator,
+  loadGeminiCliSessionsIterator,
   loadQwenCodeSessionsIterator,
   loadQoderSessionsIterator,
+  loadQoderIdeSessionsIterator,
   loadTraeSessionsIterator,
   loadZcodeSessions,
 } from "./session-loaders/alternative-sources";
 export * from "./session-loaders/alternative-sources";
 import { loadWorkBuddySessionsIterator } from "./session-loaders/workbuddy";
 export * from "./session-loaders/workbuddy";
+import {
+  claudeVisibleConversationRows,
+  extractClaudeTokenEvents,
+  extractClaudeTraceEvents,
+  firstAiTitle,
+  firstClaudeGitBranch,
+  loadClaudeCliSessionRows,
+} from "./session-loaders/claude-cli";
+export * from "./session-loaders/claude-cli";
 import {
   createIndexedSession,
   createTokenUsage,
@@ -107,6 +119,18 @@ function resolveKimiCodeRoot(homeDir: string, options: SessionLoadOptions): stri
   return options.homeDir === undefined
     ? process.env.KIMI_CODE_HOME?.trim() || path.join(homeDir, KIMI_CODE_DIR)
     : path.join(homeDir, KIMI_CODE_DIR);
+}
+
+function resolveGeminiCliRoot(homeDir: string, options: SessionLoadOptions): string {
+  if (options.homeDir !== undefined) return path.join(homeDir, GEMINI_DIR);
+  const configured = process.env.GEMINI_CLI_HOME?.trim();
+  if (!configured) return path.join(homeDir, GEMINI_DIR);
+  const expanded = configured === "~"
+    ? os.homedir()
+    : configured.startsWith("~/") || configured.startsWith("~\\")
+      ? path.join(os.homedir(), ...configured.slice(2).split(/[\\/]+/u).filter(Boolean))
+      : configured;
+  return path.join(path.resolve(expanded), GEMINI_DIR);
 }
 
 function resolveQwenCodeRoot(homeDir: string, options: SessionLoadOptions): string {
@@ -335,81 +359,6 @@ function codexVisibleConversationRows(rows: unknown[]): unknown[] {
   }
 
   return [...preamble, ...turns.flatMap((turn) => turn.rows)];
-}
-
-function claudeVisibleConversationRows(rows: unknown[]): unknown[] {
-  const conversationRows = rows.filter((row) => isRecord(row) && (row.type === "user" || row.type === "assistant"));
-  if (conversationRows.length === 0) return rows;
-
-  const nodes = new Map<string, Record<string, unknown>>();
-  for (const row of conversationRows) {
-    if (!isRecord(row)) return rows;
-    const uuid = stringField(row, "uuid");
-    if (!uuid || nodes.has(uuid)) return rows;
-    nodes.set(uuid, row);
-  }
-
-  const visibleUuids = new Set<string>();
-  let current = conversationRows.at(-1) as Record<string, unknown>;
-  while (current) {
-    const uuid = stringField(current, "uuid");
-    if (!uuid || visibleUuids.has(uuid)) return rows;
-    visibleUuids.add(uuid);
-    const parentUuid = unknownField(current, "parentUuid");
-    if (parentUuid === null || parentUuid === undefined || parentUuid === "") break;
-    if (typeof parentUuid !== "string") return rows;
-    const parent = nodes.get(parentUuid);
-    if (!parent) return rows;
-    current = parent;
-  }
-
-  return rows.filter((row) => {
-    if (!isRecord(row) || (row.type !== "user" && row.type !== "assistant")) return true;
-    return visibleUuids.has(stringField(row, "uuid"));
-  });
-}
-
-function extractClaudeTraceEvents(rows: unknown[]): TraceEventDraft[] {
-  const events: TraceEventDraft[] = [];
-
-  for (const row of rows) {
-    if (!isRecord(row) || (row.type !== "user" && row.type !== "assistant")) continue;
-    const message = objectField(row, "message");
-    const blocks = unknownField(message, "content");
-    if (!Array.isArray(blocks)) continue;
-
-    for (const block of blocks) {
-      if (!isRecord(block)) continue;
-      if (block.type === "tool_use") {
-        const input = unknownField(block, "input");
-        const name = stringField(block, "name") || "tool";
-        const summary = firstStringField(input, ["command", "cmd", "file_path", "path", "query", "url"]);
-        events.push({
-          kind: "tool_call",
-          source: "claude",
-          title: titleWithSummary(name, summary),
-          detail: stringifyDetail(input),
-          timestamp: stringField(row, "timestamp"),
-          callId: stringField(block, "id") || null,
-          eventType: null,
-          status: "running",
-        });
-      } else if (block.type === "tool_result") {
-        events.push({
-          kind: "tool_result",
-          source: "claude",
-          title: "tool result",
-          detail: stringifyDetail(unknownField(block, "content")),
-          timestamp: stringField(row, "timestamp"),
-          callId: stringField(block, "tool_use_id") || null,
-          eventType: null,
-          status: unknownField(block, "is_error") === true ? "failed" : "completed",
-        });
-      }
-    }
-  }
-
-  return events;
 }
 
 function extractCodexResponseTrace(
@@ -821,6 +770,16 @@ function extractCodexMessages(rows: unknown[]): {
     const parsed = adapter.parseLine(row);
     if (!parsed || (parsed.role === "user" && !isMeaningfulUserMessage(parsed.content))) continue;
     if (rollout.historyMode === "paginated" && parsed.role === "user") continue;
+    const completedRecordId = completedRecordIdFor(context?.sourceRecordId ?? null);
+    const completedIndex = completedRecordId ? provenanceIndexes.get(completedRecordId) ?? -1 : -1;
+    if (completedIndex >= 0) {
+      // 权威的 item_completed 记录已经先行写入，这里只补齐 response_item 独有的附件，
+      // 不再追加一条内容相同的消息。
+      if (parsed.attachments && !messages[completedIndex].attachments) {
+        messages[completedIndex] = { ...messages[completedIndex], attachments: parsed.attachments };
+      }
+      continue;
+    }
     const index = messages.length;
     messages.push({
       ...parsed,
@@ -840,6 +799,18 @@ function extractCodexMessages(rows: unknown[]): {
     agentPath: rollout.agentPath,
     pendingInterAgentCommunication: rollout.getPendingInterAgentCommunication(),
   };
+}
+
+const CODEX_RESPONSE_RECORD_PREFIX = "response_item:";
+
+/**
+ * Codex 0.149 起，`event_msg/item_completed` 会先于同一条目的 `response_item` 落盘。
+ * 两条流描述的是同一条消息，这里由 `response_item:<id>` 反推出对应的
+ * `item_completed:<id>`，让后到的 `response_item` 能认出权威记录已经写入。
+ */
+function completedRecordIdFor(sourceRecordId: string | null): string | null {
+  if (!sourceRecordId || !sourceRecordId.startsWith(CODEX_RESPONSE_RECORD_PREFIX)) return null;
+  return `item_completed:${sourceRecordId.slice(CODEX_RESPONSE_RECORD_PREFIX.length)}`;
 }
 
 function extractTraceEvents(rows: unknown[], format: SessionFormat): SessionTraceEvent[] {
@@ -1002,40 +973,6 @@ function extractCodexTokenEvents(rows: readonly CodexTokenRow[]): TokenUsageEven
   return cumulativeEntries.size > 0 ? [...cumulativeEntries.values()] : [...entries.values()];
 }
 
-function extractClaudeTokenEvents(rows: unknown[]): TokenUsageEvent[] {
-  const entries = new Map<string, TokenUsageEvent>();
-
-  rows.forEach((row, index) => {
-    if (!isRecord(row) || row.type !== "assistant") return;
-    const message = objectField(row, "message");
-    const usage = objectField(message, "usage");
-    if (!usage) return;
-
-    const cached =
-      numberField(usage, "cache_read_input_tokens") +
-      numberField(usage, "cached_input_tokens");
-    const cacheCreation = numberField(usage, "cache_creation_input_tokens");
-    const entry = createTokenUsage(
-      numberField(usage, "input_tokens"),
-      numberField(usage, "output_tokens"),
-      cached,
-      numberField(usage, "reasoning_output_tokens"),
-      cacheCreation,
-    );
-    const key = stringField(message, "id") || stringField(row, "uuid") || `${index}:${JSON.stringify(usage)}`;
-    putTokenEvent(
-      entries,
-      {
-        ...entry,
-        timestamp: parseTimestampMs(row.timestamp),
-        dedupeKey: key.startsWith("claude-code:") ? key : `claude-code:${key}`,
-      },
-    );
-  });
-
-  return [...entries.values()];
-}
-
 function extractCodeBuddyTokenEvents(rows: unknown[]): TokenUsageEvent[] {
   const entries = new Map<string, TokenUsageEvent>();
 
@@ -1113,15 +1050,6 @@ function firstDetailNumber(value: unknown, key: string): number {
   return numberField(value, key);
 }
 
-function firstClaudeGitBranch(rows: unknown[]): string | null {
-  for (const row of rows) {
-    if (!row || typeof row !== "object" || !("gitBranch" in row)) continue;
-    const branch = (row as ClaudeConversationLine).gitBranch?.trim();
-    if (branch) return branch;
-  }
-  return null;
-}
-
 // CodeBuddy rows do not currently embed gitBranch, so derive it from the
 // session working directory when that directory belongs to a Git repository.
 function readGitBranchFromCwd(cwd: string): string | null {
@@ -1183,17 +1111,6 @@ function firstCodeBuddySessionMeta(rows: unknown[], fallbackRawId: string): { ra
   }
 
   return { rawId, projectPath, timestamp };
-}
-
-// Claude and CodeBuddy write their AI-generated session title as a dedicated
-// `ai-title` row. The row is metadata and is not exposed as a visible message.
-function firstAiTitle(rows: unknown[]): string {
-  for (const row of rows) {
-    if (!isRecord(row) || row.type !== "ai-title") continue;
-    const title = stringField(row, "aiTitle").trim();
-    if (title) return title;
-  }
-  return "";
 }
 
 export function loadCodexSessionRows(
@@ -1442,6 +1359,15 @@ function createCodexScanAccumulator(base?: { offset: number; loaded: LoadedSessi
           if (existing) {
             const messageIndex = allMessages.indexOf(existing);
             if (messageIndex >= 0) allMessages.splice(messageIndex, 1);
+            // The visible output is assembled from preamble + turns, so the
+            // message must also be removed from the container that owns it or
+            // it survives the deletion.
+            for (const container of [preamble, ...turns]) {
+              const containerIndex = container.messages.indexOf(existing);
+              if (containerIndex < 0) continue;
+              container.messages.splice(containerIndex, 1);
+              break;
+            }
             messageProvenance.delete(existing);
             provenanceMessages.delete(completed.replacesSourceRecordId);
           }
@@ -1467,6 +1393,17 @@ function createCodexScanAccumulator(base?: { offset: number; loaded: LoadedSessi
             sourceTurnId: completed.sourceTurnId,
             phase: completed.phase,
           };
+        }
+      }
+      if (message && !rolloutRecord.completedMessage) {
+        const completedRecordId = completedRecordIdFor(rolloutRecord.message?.sourceRecordId ?? null);
+        const existingCompleted = completedRecordId ? provenanceMessages.get(completedRecordId) : undefined;
+        if (existingCompleted) {
+          // 同上：item_completed 先到并已成为权威记录，response_item 只补附件。
+          if (message.attachments && !existingCompleted.attachments) {
+            existingCompleted.attachments = message.attachments;
+          }
+          message = null;
         }
       }
       const traces = isRecord(row)
@@ -1697,66 +1634,6 @@ export async function* loadCodexSessionsAsyncIterator(
 
 function encodeClaudeProjectDir(cwd: string): string {
   return cwd.replace(/[^a-zA-Z0-9-]/g, "-");
-}
-
-export function loadClaudeCliSessionRows(
-  filePath: string,
-  rows: unknown[],
-  options: {
-    rawId?: string;
-    cwd?: string;
-    startedAt?: number;
-    source?: SessionSource;
-    stepcodeAgent?: "claude" | "codex";
-    stat?: VirtualSessionFileStat;
-    isSubagent?: boolean;
-    parentSessionId?: string | null;
-    includeTraceEvents?: boolean;
-  } = {},
-): LoadedSession | null {
-  const rawId = options.rawId || path.basename(filePath, ".jsonl");
-  const visibleRows = claudeVisibleConversationRows(rows);
-  const messages = extractMessages(visibleRows, "claude");
-  const tokenEvents = extractClaudeTokenEvents(rows);
-  const traceEvents = options.includeTraceEvents === false ? [] : extractTraceEvents(visibleRows, "claude");
-  const tokenUsage = tokenUsageFromEvents(tokenEvents);
-  const question = firstQuestion(messages);
-  let customTitle = "";
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const row = rows[index];
-    if (!isRecord(row) || row.type !== "custom-title") continue;
-    customTitle = stringField(row, "customTitle").trim();
-    if (customTitle) break;
-  }
-  const aiTitle = firstAiTitle(rows);
-  const embeddedCwd = (rows.find((row) => row && typeof row === "object" && "cwd" in row) as ClaudeConversationLine | undefined)?.cwd;
-  const gitBranch = firstClaudeGitBranch(rows);
-  const source = options.source
-    ?? (options.stepcodeAgent === "claude" ? "stepcode-claude" : "claude-cli");
-  return {
-    session: createIndexedSession({
-      keyPrefix: source === "tclaude-cli"
-        ? "tclaude"
-        : source === "stepcode-claude"
-          ? "stepcode-claude"
-          : "claude",
-      rawId,
-      source,
-      projectPath: options.cwd || embeddedCwd || "",
-      filePath,
-      originalTitle: customTitle || aiTitle || cleanTitle(question) || "Untitled Session",
-      firstQuestion: cleanTitle(question),
-      timestamp: options.startedAt || 0,
-      gitBranch,
-      tokenUsage,
-      stat: options.stat,
-      isSubagent: options.isSubagent,
-      parentSessionId: options.parentSessionId,
-    }),
-    messages,
-    tokenEvents,
-    traceEvents,
-  };
 }
 
 export function loadClaudeCliSessions(claudeDir = path.join(os.homedir(), ".claude"), source: SessionSource = "claude-cli"): LoadedSession[] {
@@ -2038,6 +1915,7 @@ export function* loadDefaultSessionsIterator(options: SessionLoadOptions = {}): 
     for (const dirName of TRAE_DIR_NAMES) yield* loadTraeSessionsIterator(path.join(homeDir, dirName), options);
   }
   if (options.includeQoder) yield* loadQoderSessionsIterator(path.join(homeDir, QODER_DIR), options);
+  if (options.includeQoderIde) yield* loadQoderIdeSessionsIterator(path.join(homeDir, QODER_DIR), options);
   if (options.includeDeepSeekCli) {
     const deepSeekDir = options.homeDir === undefined
       ? process.env.DSH_HOME?.trim() || path.join(homeDir, DEEPSEEK_HARNESS_DIR)
@@ -2052,6 +1930,9 @@ export function* loadDefaultSessionsIterator(options: SessionLoadOptions = {}): 
   );
   if (options.includeQwenCode) {
     yield* loadQwenCodeSessionsIterator(resolveQwenCodeRoot(homeDir, options), options);
+  }
+  if (options.includeGeminiCli) {
+    yield* loadGeminiCliSessionsIterator(resolveGeminiCliRoot(homeDir, options), options);
   }
   if (options.includeTclaude) yield* loadClaudeCliSessionsIterator(path.join(homeDir, TCLAUDE_DIR), "tclaude-cli", options);
   if (options.includeTcodex) yield* loadCodexSessionsIterator(path.join(homeDir, TCODEX_DIR), "tcodex-cli", options);
@@ -2091,6 +1972,7 @@ export async function* loadDefaultSessionsAsyncIterator(options: SessionLoadOpti
     for (const dirName of TRAE_DIR_NAMES) yield* loadTraeSessionsIterator(path.join(homeDir, dirName), options);
   }
   if (options.includeQoder) yield* loadQoderSessionsIterator(path.join(homeDir, QODER_DIR), options);
+  if (options.includeQoderIde) yield* loadQoderIdeSessionsIterator(path.join(homeDir, QODER_DIR), options);
   if (options.includeDeepSeekCli) {
     const deepSeekDir = options.homeDir === undefined
       ? process.env.DSH_HOME?.trim() || path.join(homeDir, DEEPSEEK_HARNESS_DIR)
@@ -2105,6 +1987,9 @@ export async function* loadDefaultSessionsAsyncIterator(options: SessionLoadOpti
   );
   if (options.includeQwenCode) {
     yield* loadQwenCodeSessionsIterator(resolveQwenCodeRoot(homeDir, options), options);
+  }
+  if (options.includeGeminiCli) {
+    yield* loadGeminiCliSessionsIterator(resolveGeminiCliRoot(homeDir, options), options);
   }
   if (options.includeTclaude) yield* loadClaudeCliSessionsIterator(path.join(homeDir, TCLAUDE_DIR), "tclaude-cli", options);
   if (options.includeTcodex) yield* loadCodexSessionsAsyncIterator(path.join(homeDir, TCODEX_DIR), "tcodex-cli", options);

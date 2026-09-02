@@ -14,9 +14,11 @@ export type OptionalSessionSourceSetting =
   | "includeCursorAgent"
   | "includeTrae"
   | "includeQoder"
+  | "includeQoderIde"
   | "includePi"
   | "includeKimiCli"
   | "includeQwenCode"
+  | "includeGeminiCli"
   | "includeDeepSeekCli";
 
 export type SessionSourceFamily =
@@ -35,9 +37,11 @@ export type SessionSourceFamily =
   | "cursor"
   | "trae"
   | "qoder"
+  | "qoder-ide"
   | "pi"
   | "kimi"
   | "qwen"
+  | "gemini"
   | "deepseek";
 
 export type SessionSourceUiFamily = "claude" | "codex" | "codebuddy" | "codewiz" | "zcode" | "other";
@@ -63,7 +67,7 @@ export interface SessionSourceDescriptor {
   liveFamily: LiveSessionFamily | null;
   migrationAgent: MigrationAgent | null;
   resumeTarget: MigrationTarget | null;
-  remoteFamily: "claude" | "codex" | "codebuddy" | "codewiz" | "qoder" | null;
+  remoteFamily: "claude" | "codex" | "codebuddy" | "codewiz" | "opencode" | "qoder" | null;
   nativeAppFamily: "claude" | "codex" | "codebuddy" | null;
   capabilities: SessionSourceCapabilities;
 }
@@ -153,7 +157,7 @@ export const SESSION_SOURCE_REGISTRY = {
   "opencode-cli": {
     id: "opencode-cli", label: "OpenCode", format: "opencode", family: "opencode", uiFamily: "other", statsGroup: null,
     optionalSetting: "includeOpenCode", pendingKey: "opencode", remoteCollectorOptional: false, liveFamily: "opencode", migrationAgent: null,
-    resumeTarget: null, remoteFamily: "codebuddy", nativeAppFamily: null,
+    resumeTarget: null, remoteFamily: "opencode", nativeAppFamily: null,
     capabilities: { live: true, resume: false, migrate: false, sessionSync: false, openApp: false },
   },
   "zcode-cli": {
@@ -180,6 +184,12 @@ export const SESSION_SOURCE_REGISTRY = {
     resumeTarget: null, remoteFamily: "qoder", nativeAppFamily: null,
     capabilities: { live: true, resume: false, migrate: false, sessionSync: false, openApp: false },
   },
+  "qoder-ide": {
+    id: "qoder-ide", label: "Qoder IDE", format: "qoder", family: "qoder-ide", uiFamily: "other", statsGroup: null,
+    optionalSetting: "includeQoderIde", pendingKey: "qoder-ide", remoteCollectorOptional: false, liveFamily: null, migrationAgent: null,
+    resumeTarget: null, remoteFamily: null, nativeAppFamily: null,
+    capabilities: { live: false, resume: false, migrate: false, sessionSync: false, openApp: false },
+  },
   "pi-cli": {
     id: "pi-cli", label: "Pi", format: "pi", family: "pi", uiFamily: "other", statsGroup: null,
     optionalSetting: "includePi", pendingKey: "pi", remoteCollectorOptional: false, liveFamily: null, migrationAgent: null,
@@ -195,6 +205,12 @@ export const SESSION_SOURCE_REGISTRY = {
   "qwen-code": {
     id: "qwen-code", label: "Qwen Code", format: "qwen", family: "qwen", uiFamily: "other", statsGroup: null,
     optionalSetting: "includeQwenCode", pendingKey: "qwen", remoteCollectorOptional: false, liveFamily: null, migrationAgent: null,
+    resumeTarget: null, remoteFamily: null, nativeAppFamily: null,
+    capabilities: { live: false, resume: false, migrate: false, sessionSync: false, openApp: false },
+  },
+  "gemini-cli": {
+    id: "gemini-cli", label: "Gemini CLI", format: "gemini", family: "gemini", uiFamily: "other", statsGroup: null,
+    optionalSetting: "includeGeminiCli", pendingKey: "gemini", remoteCollectorOptional: false, liveFamily: null, migrationAgent: null,
     resumeTarget: null, remoteFamily: null, nativeAppFamily: null,
     capabilities: { live: false, resume: false, migrate: false, sessionSync: false, openApp: false },
   },

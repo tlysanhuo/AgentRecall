@@ -32,9 +32,11 @@ export interface SessionLoadOptions {
   includeCursorAgent?: boolean;
   includeTrae?: boolean;
   includeQoder?: boolean;
+  includeQoderIde?: boolean;
   includePi?: boolean;
   includeKimiCli?: boolean;
   includeQwenCode?: boolean;
+  includeGeminiCli?: boolean;
   includeDeepSeekCli?: boolean;
   cursorStateDbPath?: string;
   cursorWorkspacePathMap?: ReadonlyMap<string, string>;
@@ -314,9 +316,11 @@ export function createIndexedSession(input: {
     | "cursor"
     | "trae"
     | "qoder"
+    | "qoder-ide"
     | "pi"
     | "kimi"
     | "qwen"
+    | "gemini"
     | "deepseek";
   rawId: string;
   source: SessionSource;

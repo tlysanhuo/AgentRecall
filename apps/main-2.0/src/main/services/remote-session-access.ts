@@ -1,11 +1,11 @@
 import { loadRemoteSessionDetailPayload, loadWslSessionDetailPayload } from "../../core/remote-session-loader";
 import { preflightRemoteSessionResume } from "../../core/remote-health";
 import {
+  buildRemoteInteractiveSshArgs,
   fetchRemoteSessionFilePayload,
 } from "../../core/remote-sync";
 import { isLocalSessionEnvironment } from "../../core/session-environment";
 import type { SessionStore } from "../../core/session-store";
-import { buildSshArgs } from "../../core/ssh-config";
 import type { SessionEnvironment, SessionSearchResult } from "../../core/types";
 
 export interface RemoteSessionAccessDependencies {
@@ -122,7 +122,7 @@ export class RemoteSessionAccess {
     const environment = await this.dependencies.getStore().getEnvironment(session.environmentId);
     if (!environment || environment.kind !== "ssh") return undefined;
     try {
-      return buildSshArgs(environment, "").slice(0, -1);
+      return buildRemoteInteractiveSshArgs(environment, "").slice(0, -1);
     } catch {
       return undefined;
     }
@@ -131,7 +131,7 @@ export class RemoteSessionAccess {
   private async loadDetails(sessionKey: string): Promise<void> {
     const store = this.dependencies.getStore();
     const session = await store.getSession(sessionKey);
-    if (!session || isLocalSessionEnvironment(session) || session.source === "codewiz-cli") return;
+    if (!session || isLocalSessionEnvironment(session) || session.source === "codewiz-cli" || session.source === "opencode-cli") return;
 
     const environment = await store.getEnvironment(session.environmentId);
     if (!environment) {

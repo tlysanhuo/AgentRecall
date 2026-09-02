@@ -39,6 +39,9 @@ export interface WorkflowEngineOptions {
   createId: () => string;
   defaultWorkDir?: () => string;
   now?: () => number;
+  // Fired once a run reaches a terminal status (completed/failed/cancelled),
+  // so callers can drop per-run caches; pause/resume does not fire it.
+  onRunSettled?: (runId: string) => void;
 }
 
 function cloneRun(run: WorkflowRun): WorkflowRun {
@@ -63,7 +66,9 @@ export class WorkflowEngine {
   private readonly createId: () => string;
   private readonly defaultWorkDir: () => string;
   private readonly now: () => number;
+  private readonly onRunSettled?: (runId: string) => void;
   private readonly controllers = new Map<string, AbortController>();
+  private readonly driveEpochs = new Map<string, number>();
 
   constructor(options: WorkflowEngineOptions) {
     this.store = options.store;
@@ -71,6 +76,7 @@ export class WorkflowEngine {
     this.createId = options.createId;
     this.defaultWorkDir = options.defaultWorkDir ?? (() => process.cwd());
     this.now = options.now ?? Date.now;
+    this.onRunSettled = options.onRunSettled;
   }
 
   private workDir(definition: WorkflowDefinition): string {
@@ -194,6 +200,7 @@ export class WorkflowEngine {
     run.finishedAt = this.now();
     this.record(run, "run_cancelled");
     await this.store.saveRun(run);
+    this.onRunSettled?.(runId);
     return cloneRun(run);
   }
 
@@ -207,13 +214,19 @@ export class WorkflowEngine {
   }
 
   private startDrive(run: WorkflowRun): void {
-    void this.driveInBackground(run).catch(() => undefined);
+    // Supersede any loop still driving this run: it holds a stale copy whose
+    // next save would roll back the state this call just persisted.
+    this.controllers.get(run.id)?.abort();
+    const epoch = (this.driveEpochs.get(run.id) ?? 0) + 1;
+    this.driveEpochs.set(run.id, epoch);
+    void this.driveInBackground(run, epoch).catch(() => undefined);
   }
 
-  private async driveInBackground(run: WorkflowRun): Promise<void> {
+  private async driveInBackground(run: WorkflowRun, epoch: number): Promise<void> {
     try {
-      await this.drive(run);
+      await this.drive(run, epoch);
     } catch (error) {
+      if (this.driveEpochs.get(run.id) !== epoch) return;
       const current = await this.store.getRun(run.id);
       if (!current || current.status !== "running") return;
       const failure = runError(error);
@@ -233,6 +246,9 @@ export class WorkflowEngine {
       current.finishedAt = this.now();
       this.record(current, "run_failed", { errorCode: failure.code });
       await this.store.saveRun(current);
+      this.onRunSettled?.(current.id);
+    } finally {
+      if (this.driveEpochs.get(run.id) === epoch) this.driveEpochs.delete(run.id);
     }
   }
 
@@ -258,12 +274,22 @@ export class WorkflowEngine {
     return resolved;
   }
 
-  private async drive(inputRun: WorkflowRun): Promise<WorkflowRun> {
-    const run = inputRun;
+  private async drive(inputRun: WorkflowRun, epoch: number): Promise<WorkflowRun> {
+    const run = cloneRun(inputRun);
     const controller = new AbortController();
     this.controllers.set(run.id, controller);
+    const superseded = (): boolean => this.driveEpochs.get(run.id) !== epoch;
+    // Nodes still marked running were left behind by the superseded loop's
+    // executors; requeue them so this loop owns their execution (the same
+    // requeue semantics pause/resume already use).
+    for (const state of Object.values(run.nodeRuns)) {
+      if (state.status !== "running") continue;
+      state.status = "ready";
+      delete state.startedAt;
+      delete state.finishedAt;
+    }
     try {
-      while (!controller.signal.aborted) {
+      while (!controller.signal.aborted && !superseded()) {
         const readyIds = readyWorkflowNodeIds(run.definition, run);
         if (readyIds.length === 0) break;
 
@@ -302,6 +328,7 @@ export class WorkflowEngine {
           this.record(run, "node_started", { nodeId, attempt: state.attempt });
           executable.push({ node, state, resolvedInputs: state.resolvedInputs, executor });
         }
+        if (superseded()) return this.requiredRun(run.id);
         await this.store.saveRun(run);
 
         const results = await Promise.all(executable.map(async (item) => {
@@ -319,7 +346,7 @@ export class WorkflowEngine {
           }
         }));
 
-        if (controller.signal.aborted) return this.requiredRun(run.id);
+        if (controller.signal.aborted || superseded()) return this.requiredRun(run.id);
         for (const result of results) {
           const { state, node } = result.item;
           if ("error" in result) {
@@ -393,14 +420,17 @@ export class WorkflowEngine {
           }
           break;
         }
+        if (superseded()) return this.requiredRun(run.id);
         await this.store.saveRun(run);
         if (revised) continue;
       }
 
+      if (superseded()) return this.requiredRun(run.id);
       run.status = deriveWorkflowRunStatus(run.definition, run);
       if (run.status === "completed" || run.status === "failed" || run.status === "cancelled") {
         run.finishedAt = this.now();
         this.record(run, run.status === "completed" ? "run_completed" : run.status === "failed" ? "run_failed" : "run_cancelled");
+        this.onRunSettled?.(run.id);
       }
       await this.store.saveRun(run);
       return cloneRun(run);

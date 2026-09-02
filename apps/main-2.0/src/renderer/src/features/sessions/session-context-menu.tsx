@@ -33,6 +33,7 @@ export function SessionContextMenu({
   revealLabel,
   showMacActions,
   canResume,
+  canOpenApp,
   canStepcodeResume,
   canMigrate,
   onRename,
@@ -57,6 +58,7 @@ export function SessionContextMenu({
   revealLabel: string;
   showMacActions: boolean;
   canResume: boolean;
+  canOpenApp: boolean;
   canStepcodeResume: boolean;
   canMigrate: boolean;
   onRename(): void;
@@ -134,7 +136,7 @@ export function SessionContextMenu({
           <Terminal size={14} /> Resume in iTerm
         </button>
       ) : null}
-      {canResume && showMacActions ? (
+      {canOpenApp && showMacActions ? (
         <button onClick={onOpenApp} disabled={localOnlyDisabled} title={openAppTitle}>
           <AppWindow size={14} /> Open App
         </button>

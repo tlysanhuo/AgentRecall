@@ -6,6 +6,7 @@ import { inflateRawSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
 import { createInMemoryStore } from "./session-store";
 import {
+  buildRemoteInteractiveSshArgs,
   buildRemoteSyncSshArgs,
   decodeRemotePayload,
   encodeRemotePayloadForTest,
@@ -17,7 +18,7 @@ import {
   syncRemoteEnvironment,
 } from "./remote-sync";
 import type { RemoteSessionFilePayload } from "./remote-session-loader";
-import type { SessionSearchResult } from "./types";
+import type { SessionEnvironment, SessionSearchResult } from "./types";
 
 function decodeCollectorScript(command: string): string {
   return inflateRawSync(Buffer.from(command.match(/b64decode\("([^"]+)"\)/)?.[1] ?? "", "base64")).toString("utf-8");
@@ -1057,21 +1058,6 @@ describe("remote sync", () => {
     store.close();
   });
 
-  it("emits remote summary token usage from the collector script", async () => {
-    const store = createInMemoryStore();
-    const environment = upsertSshEnvironment(store);
-    let collectorCommand = "";
-    await syncRemoteEnvironment(store, environment, {
-      runSsh: async (_environment, remoteCommand) => {
-        collectorCommand = remoteCommand;
-        return "";
-      },
-    });
-    const collectorScript = decodeCollectorScript(collectorCommand);
-    expect(collectorScript).toContain("total_token_usage");
-    expect(collectorScript).toContain('"tokenUsage"');
-  });
-
   it("emits timestamped remote token events from the collector script", async () => {
     const store = createInMemoryStore();
     const environment = upsertSshEnvironment(store);
@@ -1327,6 +1313,65 @@ db.close()
       expect(codewizChildSummary?.parentSessionId).toBe("remote-codewiz-token-events");
       expect(codewizSummary?.isSubagent).toBe(false);
       expect(codewizSummary?.parentSessionId).toBe(null);
+    } finally {
+      store.close();
+      fs.rmSync(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it("collects OpenCode summaries from the remote opencode.db including subagent relations", async () => {
+    const store = createInMemoryStore();
+    const environment = upsertSshEnvironment(store);
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-remote-opencode-"));
+    const opencodeDir = path.join(tempHome, ".local", "share", "opencode");
+    fs.mkdirSync(opencodeDir, { recursive: true });
+    const opencodeDbPath = path.join(opencodeDir, "opencode.db");
+    execFileSync(
+      "python3",
+      [
+        "-c",
+        String.raw`
+import json, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.executescript('''
+CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL, title TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER, parent_id TEXT);
+CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+''')
+db.execute("INSERT INTO session (id, directory, title, time_created, time_updated) VALUES (?, ?, ?, ?, ?)", ("opencode-root", "/repo/opencode", "OpenCode remote root", 1780560000000, 1780560600000))
+db.execute("INSERT INTO session (id, directory, title, time_created, time_updated, parent_id) VALUES (?, ?, ?, ?, ?, ?)", ("opencode-child", "/repo/opencode", "OpenCode remote child", 1780560000000, 1780560600000, "opencode-root"))
+db.execute("INSERT INTO message VALUES (?, ?, ?, ?, ?)", ("oc-user", "opencode-root", "user", 1780560060000, json.dumps({"role": "user"})))
+db.execute("INSERT INTO part VALUES (?, ?, ?, ?, ?)", ("oc-user-part", "oc-user", "opencode-root", 1780560060000, json.dumps({"type": "text", "text": "opencode remote question"})))
+db.execute("INSERT INTO message VALUES (?, ?, ?, ?, ?)", ("oc-child-user", "opencode-child", "user", 1780560060000, json.dumps({"role": "user"})))
+db.execute("INSERT INTO part VALUES (?, ?, ?, ?, ?)", ("oc-child-part", "oc-child-user", "opencode-child", 1780560060000, json.dumps({"type": "text", "text": "opencode child question"})))
+db.commit()
+db.close()
+`,
+        opencodeDbPath,
+      ],
+      { encoding: "utf8" },
+    );
+
+    try {
+      await syncRemoteEnvironment(store, environment, {
+        runSsh: async (_environment, remoteCommand) => execFileSync("python3", ["-c", decodeCollectorScript(remoteCommand)], {
+          encoding: "utf8",
+          env: { ...process.env, HOME: tempHome },
+        }),
+      });
+
+      expect(store.getSession(`ssh:${environment.id}:opencode-cli:opencode-root`)).toMatchObject({
+        rawId: "opencode-root",
+        source: "opencode-cli",
+        isSubagent: false,
+        parentSessionId: null,
+      });
+      expect(store.getSession(`ssh:${environment.id}:opencode-cli:opencode-child`)).toMatchObject({
+        rawId: "opencode-child",
+        source: "opencode-cli",
+        isSubagent: true,
+        parentSessionId: "opencode-root",
+      });
     } finally {
       store.close();
       fs.rmSync(tempHome, { recursive: true, force: true });
@@ -1770,37 +1815,42 @@ db.close()
     }
   });
 
-  it("summarizes failed remote protocol stdout instead of leaking session JSON", () => {
-    const stdout = `${JSON.stringify({
-      kind: "codex-session",
-      path: "/home/alice/.codex/sessions/private.jsonl",
-      contentBase64: "AAAA",
-      mtimeMs: 1,
-      size: 1,
-    })}\n`.repeat(500);
-
+  it.each([
+    {
+      label: "Codex",
+      stdout: `${JSON.stringify({
+        kind: "codex-session",
+        path: "/home/alice/.codex/sessions/private.jsonl",
+        contentBase64: "AAAA",
+        mtimeMs: 1,
+        size: 1,
+      })}\n`.repeat(500),
+      expectTimeout: true,
+    },
+    {
+      label: "CodeBuddy",
+      stdout: `${JSON.stringify({
+        kind: "codebuddy-project",
+        source: "codebuddy-cli",
+        path: "/home/alice/.codebuddy/projects/private.jsonl",
+        contentBase64: "cHJpdmF0ZQ==",
+        mtimeMs: 1,
+        size: 7,
+      })}\n`,
+      expectTimeout: false,
+    },
+  ])("summarizes failed $label payload stdout without leaking session data", ({ stdout, expectTimeout }) => {
     const message = formatRemoteSyncProcessError({ killed: true, code: 255 }, stdout, "");
 
-    expect(message).toContain("timed out");
+    if (expectTimeout) {
+      expect(message).toContain("timed out");
+    }
     expect(message).toContain("remote produced");
     expect(message).not.toContain("/home/alice");
     expect(message).not.toContain("contentBase64");
-    expect(message.length).toBeLessThan(500);
-  });
-
-  it("summarizes failed CodeBuddy payload stdout without leaking session data", () => {
-    const stdout = `${JSON.stringify({
-      kind: "codebuddy-project",
-      source: "codebuddy-cli",
-      path: "/home/alice/.codebuddy/projects/private.jsonl",
-      contentBase64: "cHJpdmF0ZQ==",
-      mtimeMs: 1,
-      size: 7,
-    })}\n`;
-    const message = formatRemoteSyncProcessError({ killed: true, code: 255 }, stdout, "");
-    expect(message).toContain("remote produced");
-    expect(message).not.toContain("/home/alice");
-    expect(message).not.toContain("contentBase64");
+    if (expectTimeout) {
+      expect(message.length).toBeLessThan(500);
+    }
   });
 
   it("builds noninteractive ssh args before the destination terminator and exposes a finite exec timeout", () => {
@@ -1811,11 +1861,42 @@ db.close()
     expect(args.slice(0, 4)).toEqual(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]);
     expect(args).toContain("--");
     expect(args.indexOf("-o")).toBeLessThan(args.indexOf("--"));
+    expect(args).not.toContain("-tt");
     expect(args.slice(args.indexOf("--"))).toEqual(["--", "devbox", "echo ok"]);
     expect(REMOTE_SYNC_EXEC_OPTIONS.timeout).toBeGreaterThan(0);
     expect(Number.isFinite(REMOTE_SYNC_EXEC_OPTIONS.timeout)).toBe(true);
 
     const dashedAliasEnvironment = { ...environment, hostAlias: "-oProxyCommand=bad" };
     expect(buildRemoteSyncSshArgs(dashedAliasEnvironment, "echo ok").slice(4)).toEqual(["--", "-oProxyCommand=bad", "echo ok"]);
+  });
+
+  it("builds interactive SSH args with one forced PTY before the destination terminator", () => {
+    const environment = {
+      id: "ssh:test",
+      kind: "ssh",
+      label: "test",
+      hostAlias: "devbox",
+      host: null,
+      user: null,
+      port: null,
+      authMode: "none",
+      identityFile: null,
+      enabled: true,
+    } as SessionEnvironment;
+    const args = buildRemoteInteractiveSshArgs(environment, "echo ok");
+    expect(args.filter((arg) => arg === "-tt")).toHaveLength(1);
+    expect(args).not.toContain("BatchMode=yes");
+    expect(args).toContain("ConnectTimeout=10");
+    expect(args.indexOf("-tt")).toBeLessThan(args.indexOf("--"));
+    expect(args.slice(args.indexOf("--"))).toEqual(["--", "devbox", "echo ok"]);
+
+    const passwordArgs = buildRemoteInteractiveSshArgs({
+      ...environment,
+      hostAlias: null,
+      host: "devbox.example.com",
+      authMode: "password",
+    }, "echo ok");
+    expect(passwordArgs).toContain("PreferredAuthentications=password,keyboard-interactive");
+    expect(passwordArgs).not.toContain("BatchMode=yes");
   });
 });

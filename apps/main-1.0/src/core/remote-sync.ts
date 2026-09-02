@@ -33,7 +33,7 @@ export interface RemoteSyncOptions {
 }
 
 export interface RemoteSessionSummaryPayload {
-  kind: "codex-session" | "claude-project" | "codebuddy-project" | "codewiz-session" | "qoder-project";
+  kind: "codex-session" | "claude-project" | "codebuddy-project" | "codewiz-session" | "opencode-session" | "qoder-project";
   source?: SessionSource;
   path: string;
   mtimeMs: number;
@@ -482,7 +482,7 @@ async function syncWslEnvironment(
   const runWsl = options.runSsh ?? runSystemRemote;
   store.updateEnvironmentSyncState(environment.id, "syncing", { lastError: null });
   try {
-    const output = await runWsl(environment, buildRemoteCollectorCommand([], { includeCodeWiz: false }));
+    const output = await runWsl(environment, buildRemoteCollectorCommand([], { includeCodeWiz: false, includeOpenCode: false }));
     const { payloads, summaries } = decodeRemoteSyncOutput(output);
     const enabledSummaries = summaries.filter((summary) => isSupportedWslSource(summarySource(summary)));
     for (const summary of enabledSummaries) {
@@ -557,6 +557,7 @@ function summarySource(summary: RemoteSessionSummaryPayload): SessionSource {
   if (summary.kind === "codex-session") return "codex-cli";
   if (summary.kind === "codebuddy-project") return "codebuddy-cli";
   if (summary.kind === "codewiz-session") return "codewiz-cli";
+  if (summary.kind === "opencode-session") return "opencode-cli";
   return "claude-cli";
 }
 
@@ -565,6 +566,7 @@ function payloadSourceForPayload(payload: RemoteSessionFilePayload): SessionSour
   if (payload.kind === "codex-session" || payload.kind === "codex-index") return "codex-cli";
   if (payload.kind === "codebuddy-project") return "codebuddy-cli";
   if (payload.kind === "codewiz-session") return "codewiz-cli";
+  if (payload.kind === "opencode-session") return "opencode-cli";
   if (payload.kind === "qoder-project") return "qoder";
   return "claude-cli";
 }
@@ -626,6 +628,20 @@ export function buildRemoteSyncSshArgs(environment: SessionEnvironment, remoteCo
   const separatorIndex = baseArgs.indexOf("--");
   if (separatorIndex < 0) return [...REMOTE_SYNC_SSH_OPTIONS, ...baseArgs];
   return [...baseArgs.slice(0, separatorIndex), ...REMOTE_SYNC_SSH_OPTIONS, ...baseArgs.slice(separatorIndex)];
+}
+
+export function buildRemoteInteractiveSshArgs(
+  environment: SessionEnvironment,
+  remoteCommand: string,
+): string[] {
+  const baseArgs = buildSshArgs(environment, remoteCommand);
+  const separatorIndex = baseArgs.indexOf("--");
+  if (separatorIndex < 0) return [...REMOTE_INTERACTIVE_SSH_OPTIONS, ...baseArgs];
+  return [
+    ...baseArgs.slice(0, separatorIndex),
+    ...REMOTE_INTERACTIVE_SSH_OPTIONS,
+    ...baseArgs.slice(separatorIndex),
+  ];
 }
 
 async function runSystemRemote(environment: SessionEnvironment, remoteCommand: string): Promise<string> {
@@ -697,7 +713,7 @@ async function fetchWslSessionMessagePage(
   return decodeRemoteMessagePage(output);
 }
 
-export function remoteFamilyForSource(source: SessionSource): "claude" | "codex" | "codebuddy" | "codewiz" | "qoder" {
+export function remoteFamilyForSource(source: SessionSource): "claude" | "codex" | "codebuddy" | "codewiz" | "opencode" | "qoder" {
   return sessionSourceDescriptor(source).remoteFamily ?? "codex";
 }
 
@@ -706,6 +722,7 @@ function remoteKindForSource(source: SessionSource): RemoteSessionFileKind {
   if (family === "codewiz") return "codewiz-session";
   if (family === "claude") return "claude-project";
   if (family === "codebuddy") return "codebuddy-project";
+  if (family === "opencode") return "opencode-session";
   if (family === "qoder") return "qoder-project";
   return "codex-session";
 }
@@ -731,7 +748,7 @@ print(json.dumps({
 }
 
 function buildRemoteMessagePageCommand(session: SessionSearchResult, offset: number, limit: number): string {
-  const [dbPath, codeWizSessionId] = session.source === "codewiz-cli" ? session.filePath.split("#", 2) : [session.filePath, ""];
+  const [dbPath, codeWizSessionId] = session.source === "codewiz-cli" || session.source === "opencode-cli" ? session.filePath.split("#", 2) : [session.filePath, ""];
   const request = {
     path: dbPath,
     codeWizSessionId,
@@ -750,7 +767,7 @@ end = offset + limit
 
 messages = []
 message_index = 0
-if kind == "codewiz":
+if kind in {"codewiz", "opencode"}:
   import sqlite3
   def text_from_codewiz_part(data):
     if not isinstance(data, dict):
@@ -892,7 +909,7 @@ export function formatRemoteSyncProcessError(error: unknown, stdout: string, std
 }
 
 function looksLikeRemotePayload(output: string): boolean {
-  return /^\s*\{"kind":\s*"(?:codex-session|codex-index|claude-project|claude-session-index|codebuddy-project|codewiz-session)"/.test(output);
+  return /^\s*\{"kind":\s*"(?:codex-session|codex-index|claude-project|claude-session-index|codebuddy-project|codewiz-session|opencode-session)"/.test(output);
 }
 
 function truncateRemoteError(value: string, maxChars = 1200): string {
@@ -915,6 +932,7 @@ const REMOTE_SESSION_FILE_KINDS = new Set<RemoteSessionFilePayload["kind"]>([
   "claude-project",
   "claude-session-index",
   "codewiz-session",
+  "opencode-session",
   "codebuddy-project",
   "qoder-project",
 ]);
@@ -924,6 +942,7 @@ const REMOTE_SUMMARY_SOURCES = new Set<SessionSource>(
 );
 
 const REMOTE_SYNC_SSH_OPTIONS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"];
+const REMOTE_INTERACTIVE_SSH_OPTIONS = ["-tt", "-o", "ConnectTimeout=10"];
 
 function parseRemotePayloadLine(line: string, lineNumber: number): RemoteSyncWireRecord {
   let parsed: unknown;
@@ -966,7 +985,7 @@ function parseRemoteSummaryRecord(
   lineNumber: number,
   kind: RemoteSessionSummaryPayload["kind"],
 ): RemoteSessionSummaryPayload {
-  if (kind !== "codex-session" && kind !== "claude-project" && kind !== "codebuddy-project" && kind !== "codewiz-session") {
+  if (kind !== "codex-session" && kind !== "claude-project" && kind !== "codebuddy-project" && kind !== "codewiz-session" && kind !== "opencode-session") {
     throw new Error(`Invalid remote payload at line ${lineNumber}: summaries must be session files`);
   }
   const rawId = stringField(parsed, "rawId");
@@ -1446,7 +1465,7 @@ def codewiz_token_usage(session):
     session["tokens_reasoning"] if "tokens_reasoning" in session.keys() and session["tokens_reasoning"] else 0,
   )
 
-def emit_codewiz_summaries(db_path, stat):
+def emit_codewiz_summaries(db_path, stat, kind="codewiz-session", trace_source="codewiz"):
   try:
     db = sqlite3.connect(str(db_path))
     db.row_factory = sqlite3.Row
@@ -1463,7 +1482,7 @@ def emit_codewiz_summaries(db_path, stat):
       message_count = 0
       message_events = []
       rows = codewiz_message_rows(db, raw_id)
-      token_events = codewiz_token_events(rows, "codewiz")
+      token_events = codewiz_token_events(rows, trace_source)
       for row in rows:
         parsed = parse_codewiz_row(row)
         if not parsed:
@@ -1473,7 +1492,7 @@ def emit_codewiz_summaries(db_path, stat):
         if parsed["role"] == "user" and not first_question:
           first_question = parsed["content"]
       emit({
-        "kind": "codewiz-session",
+        "kind": kind,
         "path": "%s#%s" % (str(db_path), raw_id),
         "mtimeMs": int(stat.st_mtime * 1000),
         "size": stat.st_size,
@@ -1658,6 +1677,7 @@ for kind, source, root, pattern in sources:
       pass
 
 __CODEWIZ_COLLECTION__
+__OPENCODE_COLLECTION__
 codex_titles = {
   "codex-cli": load_codex_titles(".codex"),
   __OPTIONAL_CODEX_TITLE_INDEXES__
@@ -1682,7 +1702,7 @@ for _mtime, kind, source, path, _size in sorted(candidates, key=lambda item: ite
 
 function buildRemoteCollectorCommand(
   enabledOptionalSources: SessionSource[],
-  options: { includeCodeWiz?: boolean } = {},
+  options: { includeCodeWiz?: boolean; includeOpenCode?: boolean } = {},
 ): string {
   const descriptors: Record<string, string> = {
     "tclaude-cli": '("claude-project", "tclaude-cli", home / ".tclaude" / "projects", "*.jsonl")',
@@ -1705,12 +1725,21 @@ try:
     emit_codewiz_summaries(codewiz_db, codewiz_db.stat())
 except Exception:
   pass`;
+  const opencodeCollection = options.includeOpenCode === false
+    ? ""
+    : String.raw`opencode_db = home / ".local" / "share" / "opencode" / "opencode.db"
+try:
+  if opencode_db.exists():
+    emit_codewiz_summaries(opencode_db, opencode_db.stat(), kind="opencode-session", trace_source="opencode")
+except Exception:
+  pass`;
   const script = REMOTE_COLLECTOR_SCRIPT
     .replace("__ENABLED_OPTIONAL_SOURCES__", JSON.stringify(optionalSources))
     .replace("__OPTIONAL_SOURCE_DESCRIPTORS__", optionalSources.map((source) => descriptors[source]).join(",\n  "))
     .replace("__OPTIONAL_CODEX_TITLE_INDEXES__", optionalCodexTitleIndexes)
     .replace("__OPTIONAL_CLAUDE_INDEXES__", optionalClaudeIndexes)
-    .replace("__CODEWIZ_COLLECTION__", codewizCollection);
+    .replace("__CODEWIZ_COLLECTION__", codewizCollection)
+    .replace("__OPENCODE_COLLECTION__", opencodeCollection);
   return buildPythonBase64Command(script);
 }
 

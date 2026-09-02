@@ -584,6 +584,10 @@ export function SettingsDialog({
                   <input type="checkbox" className="switch" checked={Boolean(settings?.includeQwenCode)} disabled={!settings} onChange={(event) => onSettingsChange({ includeQwenCode: event.currentTarget.checked })} />
                 </label>
                 <label className="settings-field settings-toggle">
+                  <div className="settings-field-text"><span className="settings-field-title">Include Gemini CLI</span><span className="settings-field-sub">{l("Indexes local Gemini CLI sessions read-only.", "以只读方式索引本地 Gemini CLI 会话。")}</span></div>
+                  <input type="checkbox" className="switch" checked={Boolean(settings?.includeGeminiCli)} disabled={!settings} onChange={(event) => onSettingsChange({ includeGeminiCli: event.currentTarget.checked })} />
+                </label>
+                <label className="settings-field settings-toggle">
                   <div className="settings-field-text">
                     <span className="settings-field-title">Include CodeWiz</span>
                     <span className="settings-field-sub">{l("Indexes CodeWiz sessions from ~/.local/share/codewiz.", "索引 ~/.local/share/codewiz 中的 CodeWiz 会话。")}</span>
@@ -756,6 +760,24 @@ export function SettingsDialog({
                     checked={Boolean(settings?.includeQoder)}
                     disabled={!settings}
                     onChange={(event) => onSettingsChange({ includeQoder: event.currentTarget.checked })}
+                  />
+                </label>
+                <label className="settings-field settings-toggle">
+                  <div className="settings-field-text">
+                    <span className="settings-field-title">Include Qoder IDE</span>
+                    <span className="settings-field-sub">
+                      {l(
+                        "Indexes legacy Qoder IDE conversations from ~/.qoder/cache/projects.",
+                        "索引 ~/.qoder/cache/projects 中的旧版 Qoder IDE 对话记录。",
+                      )}
+                    </span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    className="switch"
+                    checked={Boolean(settings?.includeQoderIde)}
+                    disabled={!settings}
+                    onChange={(event) => onSettingsChange({ includeQoderIde: event.currentTarget.checked })}
                   />
                 </label>
                 <label className="settings-field settings-toggle">

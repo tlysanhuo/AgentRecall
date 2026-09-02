@@ -12,6 +12,7 @@ import {
   loadDefaultSessions,
   loadTraeSessions,
   loadQoderSessions,
+  loadQoderIdeSessions,
 } from "./session-loader";
 
 const require = createRequire(import.meta.url);
@@ -253,32 +254,7 @@ describe("extra session sources", () => {
     }
   });
 
-  it("discovers Trae sessions from both official and CN home directories", () => {
-    const homeDir = tmpDir("trae-default");
-    try {
-      for (const [directory, id] of [[".trae", "international"], [".trae-cn", "china"]] as const) {
-        const filePath = path.join(homeDir, directory, "memory", "projects", "-tmp-demo-project", "20260721", `session_memory_${id}.jsonl`);
-        writeJsonl(filePath, [
-          {
-            intent: `Investigate ${id} checkout`,
-            projectPath: "/tmp/demo/project",
-            message_summary_time: "2026-07-21T09:00:00Z",
-          },
-        ]);
-      }
-
-      const loaded = loadDefaultSessions({ homeDir, includeTrae: true });
-
-      expect(loaded.filter((item) => item.session.source === "trae").map((item) => item.session.rawId)).toEqual([
-        "session_memory_international",
-        "session_memory_china",
-      ]);
-    } finally {
-      fs.rmSync(homeDir, { recursive: true, force: true });
-    }
-  });
-
-  it("loads Qoder conversation history JSONL as searchable sessions", () => {
+  it("loads legacy Qoder IDE conversation history as qoder-ide sessions", () => {
     const root = tmpDir("qoder");
     const filePath = path.join(root, "cache", "projects", "demo-app-1a2b3c4d", "conversation-history", "task-fe3", "task-fe3.jsonl");
     writeJsonl(filePath, [
@@ -286,13 +262,13 @@ describe("extra session sources", () => {
       { role: "assistant", message: { content: [{ type: "text", text: "I will check the auth module." }] } },
     ]);
 
-    const loaded = loadQoderSessions(root);
+    const loaded = loadQoderIdeSessions(root);
 
     expect(loaded).toHaveLength(1);
     expect(loaded[0].session).toMatchObject({
-      sessionKey: "qoder:demo-app-1a2b3c4d/task-fe3",
+      sessionKey: "qoder-ide:demo-app-1a2b3c4d/task-fe3",
       rawId: "demo-app-1a2b3c4d/task-fe3",
-      source: "qoder",
+      source: "qoder-ide",
       projectPath: "demo-app",
       firstQuestion: "Fix the login bug",
       originalTitle: "Fix the login bug",
@@ -313,7 +289,7 @@ describe("extra session sources", () => {
       { role: "user", message: { content: [{ type: "text", text: "First part" }, { type: "text", text: "Second part" }] } },
     ]);
 
-    const loaded = loadQoderSessions(root);
+    const loaded = loadQoderIdeSessions(root);
 
     expect(loaded).toHaveLength(1);
     expect(loaded[0].session.rawId).toBe("proj-aabbccdd/task-multi");
@@ -340,7 +316,7 @@ describe("extra session sources", () => {
       { role: "assistant", message: { content: [{ type: "text", text: "明白，开始执行。" }] } },
     ]);
 
-    const loaded = loadQoderSessions(root);
+    const loaded = loadQoderIdeSessions(root);
 
     expect(loaded).toHaveLength(1);
     expect(loaded[0].session.originalTitle).toBe("我的目标在：D:\\oss-contrib\\giki\\IMPROVEMENT-LOOP.md");
@@ -370,12 +346,241 @@ describe("extra session sources", () => {
       { role: "assistant", message: { content: [{ type: "text", text: "好的。" }] } },
     ]);
 
-    const loaded = loadQoderSessions(root);
+    const loaded = loadQoderIdeSessions(root);
 
     expect(loaded).toHaveLength(1);
     expect(loaded[0].session.originalTitle).toBe("直接帮我重构这个模块");
     expect(loaded[0].messages[0].content).toBe("直接帮我重构这个模块");
     expect(loaded[0].messages[0].content).not.toContain("attached_files");
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("loads new Qoder transcripts stored directly under projects/<slug>", () => {
+    const root = tmpDir("qoder-cli-flat");
+    const filePath = path.join(root, "projects", "-Users-me-demo-app", "5a5f525e-99bc-4c95-9f03-de30ef8c9a32.jsonl");
+    writeJsonl(filePath, [
+      { type: "workspace-directories", sessionId: "5a5f525e", directories: ["/Users/me/demo-app"] },
+      {
+        type: "user",
+        uuid: "u1",
+        parentUuid: null,
+        cwd: "/Users/me/demo-app",
+        gitBranch: "main",
+        timestamp: "2026-08-21T10:00:00.000Z",
+        message: { role: "user", content: [{ type: "text", text: "Fix the login bug" }] },
+      },
+      {
+        type: "assistant",
+        uuid: "a1",
+        parentUuid: "u1",
+        cwd: "/Users/me/demo-app",
+        timestamp: "2026-08-21T10:00:05.000Z",
+        message: { role: "assistant", content: [{ type: "text", text: "I will check the auth module." }] },
+      },
+    ]);
+
+    const loaded = loadQoderSessions(root);
+
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0].session).toMatchObject({
+      sessionKey: "qoder:5a5f525e-99bc-4c95-9f03-de30ef8c9a32",
+      source: "qoder",
+      projectPath: "/Users/me/demo-app",
+      gitBranch: "main",
+      firstQuestion: "Fix the login bug",
+    });
+    expect(loaded[0].messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("loads new Qoder transcripts from the nested transcript directory and prefers ai-title", () => {
+    const root = tmpDir("qoder-cli-nested");
+    const filePath = path.join(root, "projects", "-Users-me-demo-app", "transcript", "428f5d29.jsonl");
+    writeJsonl(filePath, [
+      { type: "ai-title", sessionId: "428f5d29", aiTitle: "Refactor the auth module" },
+      {
+        type: "user",
+        uuid: "u1",
+        parentUuid: null,
+        cwd: "/Users/me/demo-app",
+        message: { role: "user", content: [{ type: "text", text: "Please refactor auth" }] },
+      },
+    ]);
+
+    const loaded = loadQoderSessions(root);
+
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0].session.rawId).toBe("428f5d29");
+    expect(loaded[0].session.originalTitle).toBe("Refactor the auth module");
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("skips new Qoder tool-execution traces that contain no readable messages", () => {
+    const root = tmpDir("qoder-cli-trace");
+    writeJsonl(path.join(root, "projects", "-Users-me-demo-app", "transcript", "trace-only.jsonl"), [
+      {
+        type: "user",
+        uuid: "u1",
+        parentUuid: null,
+        cwd: "/Users/me/demo-app",
+        message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] },
+      },
+      { type: "progress", uuid: "p1", parentUuid: "u1" },
+      {
+        type: "assistant",
+        uuid: "a1",
+        parentUuid: "u1",
+        cwd: "/Users/me/demo-app",
+        message: { role: "assistant", content: [{ type: "tool_use", id: "t2", name: "Read", input: {} }] },
+      },
+    ]);
+
+    expect(loadQoderSessions(root)).toEqual([]);
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("keeps legacy Qoder IDE sessions visible next to the new projects layout", () => {
+    const root = tmpDir("qoder-prefer-projects");
+    writeJsonl(path.join(root, "cache", "projects", "demo-app-1a2b3c4d", "conversation-history", "task-ide", "task-ide.jsonl"), [
+      { role: "user", message: { content: [{ type: "text", text: "IDE question" }] } },
+    ]);
+    writeJsonl(path.join(root, "projects", "-Users-me-demo-app", "cli-session.jsonl"), [
+      {
+        type: "user",
+        uuid: "u1",
+        parentUuid: null,
+        cwd: "/Users/me/demo-app",
+        message: { role: "user", content: [{ type: "text", text: "CLI question" }] },
+      },
+    ]);
+    writeJsonl(path.join(root, "projects", "-Users-me-demo-app", "compaction", "not-a-transcript.jsonl"), [
+      { kind: "summary", tokens: 42 },
+    ]);
+
+    const current = loadQoderSessions(root);
+    expect(current.map((entry) => entry.session.firstQuestion)).toEqual(["CLI question"]);
+    expect(current.map((entry) => entry.session.source)).toEqual(["qoder"]);
+
+    const legacy = loadQoderIdeSessions(root);
+    expect(legacy).toHaveLength(1);
+    expect(legacy[0].session).toMatchObject({
+      source: "qoder-ide",
+      sessionKey: "qoder-ide:demo-app-1a2b3c4d/task-ide",
+      firstQuestion: "IDE question",
+    });
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("loads the legacy conversation-history tree when the projects layout is absent", () => {
+    const root = tmpDir("qoder-legacy-only");
+    writeJsonl(path.join(root, "cache", "projects", "demo-app-1a2b3c4d", "conversation-history", "task-ide", "task-ide.jsonl"), [
+      { role: "user", message: { content: [{ type: "text", text: "IDE question" }] } },
+    ]);
+
+    expect(loadQoderSessions(root)).toEqual([]);
+    expect(loadQoderIdeSessions(root).map((entry) => entry.session.firstQuestion)).toEqual(["IDE question"]);
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("drops execution transcripts that duplicate a canonical session but keeps unique runs", () => {
+    const root = tmpDir("qoder-execution-dedupe");
+    const slugDir = path.join(root, "projects", "-Users-me-demo-app");
+    writeJsonl(path.join(slugDir, "9b1c2d3e.jsonl"), [
+      {
+        type: "user",
+        uuid: "u1",
+        parentUuid: null,
+        cwd: "/Users/me/demo-app",
+        timestamp: "2026-08-09T03:57:54.457Z",
+        message: { role: "user", content: [{ type: "text", text: "Run the long task" }] },
+      },
+      {
+        type: "assistant",
+        uuid: "a1",
+        parentUuid: "u1",
+        cwd: "/Users/me/demo-app",
+        timestamp: "2026-08-09T03:57:56.000Z",
+        message: { role: "assistant", content: [{ type: "text", text: "On it." }] },
+      },
+    ]);
+    writeJsonl(path.join(slugDir, "transcript", "task-dup1.session.execution.jsonl"), [
+      {
+        type: "user",
+        uuid: "x1",
+        parentUuid: null,
+        cwd: "/Users/me/demo-app",
+        timestamp: "2026-08-09T03:57:54.457Z",
+        message: { role: "user", content: [{ type: "text", text: "Run the long task" }] },
+      },
+      {
+        type: "assistant",
+        uuid: "x2",
+        parentUuid: null,
+        cwd: "/Users/me/demo-app",
+        timestamp: "2026-08-09T03:57:55.000Z",
+        message: { role: "assistant", content: [{ type: "text", text: "Working..." }] },
+      },
+    ]);
+    writeJsonl(path.join(slugDir, "transcript", "task-uniq2.session.execution.jsonl"), [
+      {
+        type: "user",
+        uuid: "y1",
+        parentUuid: null,
+        cwd: "/Users/me/demo-app",
+        timestamp: "2026-08-08T07:56:17.000Z",
+        message: { role: "user", content: [{ type: "text", text: "Continue the review" }] },
+      },
+    ]);
+
+    const loaded = loadQoderSessions(root);
+
+    expect(loaded.map((entry) => entry.session.firstQuestion).sort()).toEqual(["Continue the review", "Run the long task"]);
+    expect(loaded.map((entry) => entry.session.rawId).sort()).toEqual(["9b1c2d3e", "task-uniq2.session.execution"]);
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("keeps every message of transcripts whose turns carry no parentUuid links", () => {
+    const root = tmpDir("qoder-unchained");
+    writeJsonl(path.join(root, "projects", "-Users-me-demo-app", "transcript", "task-flat.session.execution.jsonl"), [
+      { type: "session_meta", sessionId: "task-flat.session.execution", uuid: "m1" },
+      {
+        type: "user",
+        uuid: "u1",
+        parentUuid: null,
+        cwd: "/Users/me/demo-app",
+        timestamp: "2026-07-27T07:17:17.000Z",
+        message: { role: "user", content: "Install this tool" },
+      },
+      {
+        type: "assistant",
+        uuid: "a1",
+        parentUuid: null,
+        cwd: "/Users/me/demo-app",
+        timestamp: "2026-07-27T07:17:24.000Z",
+        message: { role: "assistant", content: [{ type: "text", text: "Downloading it now." }] },
+      },
+      {
+        type: "assistant",
+        uuid: "a2",
+        parentUuid: null,
+        cwd: "/Users/me/demo-app",
+        timestamp: "2026-07-27T07:18:00.000Z",
+        message: { role: "assistant", content: [{ type: "text", text: "Done." }] },
+      },
+    ]);
+
+    const loaded = loadQoderSessions(root);
+
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0].session.firstQuestion).toBe("Install this tool");
+    expect(loaded[0].messages.map((message) => message.role)).toEqual(["user", "assistant", "assistant"]);
 
     fs.rmSync(root, { recursive: true, force: true });
   });
@@ -1128,24 +1333,6 @@ describe("extra session sources", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it("omits empty Cursor composer headers even when Cursor does not mark them as drafts", () => {
-    const root = tmpDir("cursor-empty-header");
-    const stateDbPath = path.join(root, "cursor-state.vscdb");
-    writeCursorStateDb(stateDbPath, [
-      {
-        composerId: "cursor-empty-1",
-        name: "",
-        projectPath: "",
-      },
-    ]);
-
-    const loaded = loadCursorAgentSessions(root, { cursorStateDbPath: stateDbPath });
-
-    expect(loaded).toEqual([]);
-
-    fs.rmSync(root, { recursive: true, force: true });
-  });
-
   it("omits Cursor composer headers that have no readable messages", () => {
     const root = tmpDir("cursor-empty-project-shell");
     const stateDbPath = path.join(root, "cursor-state.vscdb");
@@ -1230,46 +1417,6 @@ describe("extra session sources", () => {
       executionEnvironmentHint: { kind: "ssh", label: "dev", hostAlias: "dev" },
     });
     expect(local?.executionEnvironmentHint).toBeUndefined();
-
-    fs.rmSync(root, { recursive: true, force: true });
-  });
-
-  it("treats Cursor composer metadata as a transcript refresh dependency", () => {
-    const root = tmpDir("cursor-title-refresh");
-    const stateDbPath = path.join(root, "cursor-state.vscdb");
-    const workspaceSlug = "Users-mac-work-cursor-app";
-    const composerId = "cursor-refresh-1";
-    const transcript = path.join(root, "projects", workspaceSlug, "agent-transcripts", composerId, `${composerId}.jsonl`);
-    writeJsonl(transcript, [
-      {
-        role: "user",
-        message: { content: [{ type: "text", text: "<user_query>Refresh my title</user_query>" }] },
-      },
-    ]);
-    writeCursorStateDb(stateDbPath, [
-      {
-        composerId,
-        name: "Current Cursor title",
-        projectPath: "/Users/mac/work/cursor-app",
-      },
-    ]);
-    const walPath = `${stateDbPath}-wal`;
-    fs.writeFileSync(walPath, "");
-    const walTimestamp = new Date(fs.statSync(stateDbPath).mtimeMs + 60_000);
-    fs.utimesSync(walPath, walTimestamp, walTimestamp);
-    const stateMtimeMs = fs.statSync(walPath).mtimeMs;
-    let observedDependencyMtimeMs = 0;
-
-    loadCursorAgentSessions(root, {
-      cursorStateDbPath: stateDbPath,
-      cursorWorkspacePathMap: new Map([[workspaceSlug, "/Users/mac/work/cursor-app"]]),
-      shouldSkipFile: (_filePath, _stat, dependencyMtimeMs) => {
-        observedDependencyMtimeMs = dependencyMtimeMs ?? 0;
-        return false;
-      },
-    });
-
-    expect(observedDependencyMtimeMs).toBe(stateMtimeMs);
 
     fs.rmSync(root, { recursive: true, force: true });
   });

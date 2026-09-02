@@ -91,7 +91,7 @@ import { PostgresDatabase } from "../core/postgres/database";
 import { POSTGRES_MIGRATIONS } from "../core/postgres/schema";
 import { diagnoseRemoteEnvironment } from "../core/remote-health";
 import {
-  buildRemoteSyncSshArgs,
+  buildRemoteInteractiveSshArgs,
   fetchRemoteSessionFilePayload,
   fetchRemoteSessionMessagePage,
   syncRemoteEnvironment,
@@ -1974,9 +1974,11 @@ function runIndexSync(): Promise<IndexStatus> {
         includePi: settings.includePi,
         includeKimiCli: settings.includeKimiCli,
         includeQwenCode: settings.includeQwenCode,
+        includeGeminiCli: settings.includeGeminiCli,
         includeCursorAgent: settings.includeCursorAgent,
         includeTrae: settings.includeTrae,
         includeQoder: settings.includeQoder,
+        includeQoderIde: settings.includeQoderIde,
         includeDeepSeekCli: settings.includeDeepSeekCli,
       },
       indexFailureLogPath: indexFailureLogger.logPath,
@@ -2126,10 +2128,6 @@ function migrationResumeDisplayCommand(target: MigrationTarget, sessionId: strin
   return getMigrationResumeProcessSpec(target, sessionId, projectPath, getSettings()).displayCommand;
 }
 
-function quotePosixToken(value: string): string {
-  return /^[A-Za-z0-9_\-./]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
-}
-
 function fallbackMigrationResumeDisplayCommand(target: MigrationTarget, sessionId: string, projectPath: string): string {
   return getSafeMigrationResumeCommand(target, sessionId, projectPath, getSettings());
 }
@@ -2219,7 +2217,7 @@ async function createSourceRemoteRestoreDependencies(
         );
         return;
       }
-      const sshArgs = buildRemoteSyncSshArgs(environment, "").slice(0, -1);
+      const sshArgs = buildRemoteInteractiveSshArgs(environment, "").slice(0, -1);
       await openResumeInTerminal(session, getSettings(), { sshArgs });
     },
     resumeCommand: (target, targetSessionId, projectPath) =>
@@ -2316,8 +2314,8 @@ function remoteMigrationResumeDisplayCommand(
       { wslDistribution: environment.wslDistribution },
     );
   }
-  const remoteCommand = getMigrationResumeProcessSpec(target, sessionId, projectPath, getSettings(), { platform: "linux" }).displayCommand;
-  return ["ssh", ...buildRemoteSyncSshArgs(environment, remoteCommand).map(quotePosixToken)].join(" ");
+  const sshArgs = buildRemoteInteractiveSshArgs(environment, "").slice(0, -1);
+  return getResumeCommand(migrationLaunchSession(environment, target, sessionId, projectPath), getSettings(), { sshArgs });
 }
 
 function localSessionMigrationRuntime(event: IpcMainInvokeEvent) {
@@ -2590,10 +2588,12 @@ async function maybeAutoBackfillSummaries(): Promise<void> {
   if (summaryBackfillRunning) return;
   const settings = getSettings();
   if (!settings.summaryAutoBackfill) return;
-  const endpoint = await resolveSummaryEndpointFromSettings();
-  if (!endpoint) return;
+  // Claim the flag before any await, so overlapping index completions cannot
+  // both pass the guard and start duplicate backfill runs.
   summaryBackfillRunning = true;
   try {
+    const endpoint = await resolveSummaryEndpointFromSettings();
+    if (!endpoint) return;
     const maxAgeMs = settings.summaryMaxAgeDays * 86_400_000;
     const candidates = await store.listSessionsNeedingSummary(Date.now(), maxAgeMs, 25);
     for (const candidate of candidates) {

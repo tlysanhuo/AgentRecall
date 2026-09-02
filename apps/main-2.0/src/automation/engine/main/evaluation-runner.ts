@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { executeEvaluationRun } from "../../../core/evaluation/run";
 import type { EvaluationPlanEvaluator } from "../../../core/evaluation/case-graph";
 import type {
@@ -84,7 +86,7 @@ export interface RunEvaluationInput {
 
 export async function runEvaluation(input: RunEvaluationInput): Promise<EvaluationRun> {
   const startedAt = Date.now();
-  const runId = input.runId ?? `eval-run-${startedAt}`;
+  const runId = input.runId ?? `eval-run-${startedAt}-${randomUUID()}`;
   const repetitions = Math.max(1, Math.min(5, input.experiment.repetitions));
   const results: EvaluationCaseResult[] = [];
 
