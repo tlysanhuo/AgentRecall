@@ -18,6 +18,7 @@ export type OptionalSessionSourceSetting =
   | "includePi"
   | "includeKimiCli"
   | "includeQwenCode"
+  | "includeGeminiCli"
   | "includeDeepSeekCli";
 
 export type SessionSourceFamily =
@@ -40,6 +41,7 @@ export type SessionSourceFamily =
   | "pi"
   | "kimi"
   | "qwen"
+  | "gemini"
   | "deepseek";
 
 export type SessionSourceUiFamily = "claude" | "codex" | "codebuddy" | "codewiz" | "zcode" | "other";
@@ -203,6 +205,12 @@ export const SESSION_SOURCE_REGISTRY = {
   "qwen-code": {
     id: "qwen-code", label: "Qwen Code", format: "qwen", family: "qwen", uiFamily: "other", statsGroup: null,
     optionalSetting: "includeQwenCode", pendingKey: "qwen", remoteCollectorOptional: false, liveFamily: null, migrationAgent: null,
+    resumeTarget: null, remoteFamily: null, nativeAppFamily: null,
+    capabilities: { live: false, resume: false, migrate: false, sessionSync: false, openApp: false },
+  },
+  "gemini-cli": {
+    id: "gemini-cli", label: "Gemini CLI", format: "gemini", family: "gemini", uiFamily: "other", statsGroup: null,
+    optionalSetting: "includeGeminiCli", pendingKey: "gemini", remoteCollectorOptional: false, liveFamily: null, migrationAgent: null,
     resumeTarget: null, remoteFamily: null, nativeAppFamily: null,
     capabilities: { live: false, resume: false, migrate: false, sessionSync: false, openApp: false },
   },

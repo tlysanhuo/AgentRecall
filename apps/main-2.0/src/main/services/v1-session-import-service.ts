@@ -45,6 +45,7 @@ const V1_SETTINGS_KEYS = [
   "includePi",
   "includeKimiCli",
   "includeQwenCode",
+  "includeGeminiCli",
   "summaryAutoBackfill",
   "summaryMaxAgeDays",
   "compressionConcurrency",
@@ -70,7 +71,7 @@ const V1_SETTINGS_KEYS = [
 const SESSION_SOURCES = new Set<SessionSource>([
   "claude-cli", "claude-app", "codex-cli", "codex-app", "tclaude-cli", "tcodex-cli",
   "codebuddy-cli", "workbuddy-cli", "codewiz-cli", "openclaw", "hermes", "opencode-cli", "zcode-cli",
-  "cursor-agent", "trae", "qoder", "pi-cli", "kimi-cli", "qwen-code", "deepseek-cli",
+  "cursor-agent", "trae", "qoder", "pi-cli", "kimi-cli", "qwen-code", "gemini-cli", "deepseek-cli",
 ]);
 
 interface V1SessionRow {
