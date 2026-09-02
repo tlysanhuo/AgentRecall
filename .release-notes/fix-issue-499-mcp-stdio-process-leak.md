@@ -4,4 +4,4 @@
 
 ## Bug 修复
 
-- 修复宿主客户端退出后 Gateway / Workflow stdio MCP 进程残留的问题：stdin 关闭或管道中断时，服务会在给在途请求留出有限的收尾窗口（默认 5 秒，可用 `AGENT_RECALL_MCP_SHUTDOWN_DRAIN_MS` 调整）后自行退出，并响应 SIGTERM / SIGINT 信号（#499 问题 2）。
+- 修复宿主客户端(如 Codex、Claude Code)退出后 Gateway / Workflow MCP 进程残留、随时间不断累积的问题:这些进程现在会在收尾后自行退出,不再长期占用系统资源。

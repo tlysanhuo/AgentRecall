@@ -419,7 +419,15 @@ describe("MCP server tools", () => {
       await fetchGate;
       return { ok: true, status: 200, json: async () => ({ ok: true, workflowId: "wf_1" }) } as Response;
     });
-    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    vi.spyOn(process.stdout, "write").mockImplementation(((
+      _chunk: unknown,
+      encodingOrCallback?: BufferEncoding | (() => void),
+      maybeCallback?: () => void,
+    ) => {
+      const callback = typeof encodingOrCallback === "function" ? encodingOrCallback : maybeCallback;
+      if (callback) setImmediate(callback);
+      return true;
+    }) as typeof process.stdout.write);
     const exitCodes: number[] = [];
     const stdin = new PassThrough();
 
@@ -432,6 +440,35 @@ describe("MCP server tools", () => {
     expect(exitCodes).toEqual([]);
 
     releaseFetch();
+    await vi.waitFor(() => expect(exitCodes).toEqual([0]));
+  });
+
+  test("waits for the last response to flush before exiting on stdin close", async () => {
+    let releaseFlush!: () => void;
+    const flushGate = new Promise<void>((resolve) => {
+      releaseFlush = resolve;
+    });
+    vi.spyOn(process.stdout, "write").mockImplementation(((
+      _chunk: unknown,
+      encodingOrCallback?: BufferEncoding | (() => void),
+      maybeCallback?: () => void,
+    ) => {
+      const callback = typeof encodingOrCallback === "function" ? encodingOrCallback : maybeCallback;
+      if (callback) void flushGate.then(callback);
+      return true;
+    }) as typeof process.stdout.write);
+    const exitCodes: number[] = [];
+    const stdin = new PassThrough();
+
+    startStdioMcpServer({ stdin, signalTarget: { on: () => undefined }, exit: (code) => exitCodes.push(code) });
+
+    stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 11, method: "tools/list", params: {} })}\n`);
+    await new Promise((resolve) => setImmediate(resolve));
+    stdin.end();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(exitCodes).toEqual([]);
+
+    releaseFlush();
     await vi.waitFor(() => expect(exitCodes).toEqual([0]));
   });
 

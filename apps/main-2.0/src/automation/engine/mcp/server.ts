@@ -807,8 +807,21 @@ export async function callMcpTool(name: string, args: unknown): Promise<unknown>
   return payload;
 }
 
+interface StdioServerLifecycle {
+  beginRequest(): void;
+  endRequest(): void;
+  beginStdoutWrite(): (() => void) | null;
+}
+
+let activeStdioServer: StdioServerLifecycle | null = null;
+
 function writeJsonRpc(payload: unknown): void {
-  process.stdout.write(`${JSON.stringify(payload)}\n`);
+  const line = `${JSON.stringify(payload)}\n`;
+  // Pipe writes are asynchronous; only count a response as delivered once its
+  // write callback fires, so shutdown never truncates the last response.
+  const finishWrite = activeStdioServer?.beginStdoutWrite();
+  if (finishWrite) process.stdout.write(line, finishWrite);
+  else process.stdout.write(line);
 }
 
 async function handleJsonRpc(request: JsonRpcRequest): Promise<void> {
@@ -891,6 +904,7 @@ export function startStdioMcpServer(options: StdioMcpServerOptions = {}): void {
   const drainMs = options.drainMs ?? shutdownDrainMsFromEnvironment();
   let buffer = "";
   let inFlightRequests = 0;
+  let pendingStdoutWrites = 0;
   let shutdownReason: string | null = null;
   let exited = false;
   const exitOnce = (code: number) => {
@@ -898,18 +912,38 @@ export function startStdioMcpServer(options: StdioMcpServerOptions = {}): void {
     exited = true;
     exit(code);
   };
+  const settle = () => {
+    if (shutdownReason !== null && inFlightRequests <= 0 && pendingStdoutWrites <= 0) exitOnce(0);
+  };
   const shutdown = (reason: string) => {
     if (shutdownReason !== null) return;
     shutdownReason = reason;
-    if (inFlightRequests <= 0) {
+    if (inFlightRequests <= 0 && pendingStdoutWrites <= 0) {
       exitOnce(0);
       return;
     }
     // The host is already gone; give in-flight requests a bounded window to
-    // write their last responses, then stop instead of leaking the process.
+    // flush their last responses, then stop instead of leaking the process.
     const drainTimer = setTimeout(() => exitOnce(0), drainMs);
     drainTimer.unref();
   };
+  const lifecycle: StdioServerLifecycle = {
+    beginRequest: () => {
+      inFlightRequests += 1;
+    },
+    endRequest: () => {
+      inFlightRequests -= 1;
+      settle();
+    },
+    beginStdoutWrite: () => {
+      pendingStdoutWrites += 1;
+      return () => {
+        pendingStdoutWrites -= 1;
+        settle();
+      };
+    },
+  };
+  activeStdioServer = lifecycle;
 
   stdin.setEncoding("utf8");
   stdin.on("data", (chunk: string) => {
@@ -921,11 +955,8 @@ export function startStdioMcpServer(options: StdioMcpServerOptions = {}): void {
       const line = buffer.slice(0, newlineIndex).trim();
       buffer = buffer.slice(newlineIndex + 1);
       if (!line) continue;
-      inFlightRequests += 1;
-      void handleJsonRpc(JSON.parse(line) as JsonRpcRequest).finally(() => {
-        inFlightRequests -= 1;
-        if (shutdownReason !== null && inFlightRequests <= 0) exitOnce(0);
-      });
+      lifecycle.beginRequest();
+      void handleJsonRpc(JSON.parse(line) as JsonRpcRequest).finally(() => lifecycle.endRequest());
     }
   });
   // Hosts release stdio MCP servers by closing the pipes; without these
