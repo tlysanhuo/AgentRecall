@@ -25,16 +25,26 @@ async function killAndWaitForExit(child: ReturnType<typeof spawn>): Promise<void
   if (child.exitCode === null && child.signalCode === null && !child.killed) child.kill();
   if (child.exitCode !== null || child.signalCode !== null) return;
   await new Promise<void>((resolve) => {
-    // Bounded so a stubborn child cannot hang the suite on top of a failure.
-    const timer = setTimeout(resolve, 2_000);
-    child.once("close", () => {
-      clearTimeout(timer);
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(escalate);
+      clearTimeout(backstop);
       resolve();
-    });
-    child.once("error", () => {
-      clearTimeout(timer);
-      resolve();
-    });
+    };
+    // SIGTERM may be ignored or stuck; escalate to SIGKILL and drop our ends
+    // of the pipes so nothing can hold the suite open on top of a failure.
+    const escalate = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      child.stdin?.destroy();
+    }, 2_000);
+    // Absolute backstop: even a child that refuses to die cannot hang here.
+    const backstop = setTimeout(settle, 5_000);
+    child.once("close", settle);
+    child.once("error", settle);
   });
 }
 describe("MCP server tools", () => {
