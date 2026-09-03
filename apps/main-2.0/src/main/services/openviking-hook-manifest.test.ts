@@ -3,7 +3,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { OpenVikingHookManifestService } from "./openviking-hook-manifest";
+import {
+  OpenVikingHookManifestPublisher,
+  OpenVikingHookManifestService,
+} from "./openviking-hook-manifest";
 
 const roots: string[] = [];
 
@@ -99,6 +102,38 @@ describe("OpenVikingHookManifestService", () => {
     await service.clear();
 
     await expect(stat(manifestPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+describe("OpenVikingHookManifestPublisher", () => {
+  it("serializes publication and republishes the latest dirty state", async () => {
+    let release!: () => void;
+    const firstPublish = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    const publisher = new OpenVikingHookManifestPublisher(async () => {
+      calls += 1;
+      if (calls === 1) await firstPublish;
+    });
+
+    const first = publisher.refresh();
+    const second = publisher.refresh();
+    expect(calls).toBe(1);
+    release();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
+    expect(calls).toBe(2);
+  });
+
+  it("keeps a failed publication dirty for the next refresh", async () => {
+    let calls = 0;
+    const publisher = new OpenVikingHookManifestPublisher(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("disk busy");
+    });
+
+    await expect(publisher.refresh()).rejects.toThrow("disk busy");
+    await expect(publisher.refresh()).resolves.toBeUndefined();
+    expect(calls).toBe(2);
   });
 });
 

@@ -8,9 +8,10 @@ import {
   type OpenVikingWorkspace,
 } from "../../core/openviking-memory";
 import type { OpenVikingMemoryControl } from "../../core/openviking-memory-control";
-import type {
-  OpenVikingClientPort,
-  OpenVikingWorkspaceAuth,
+import {
+  OpenVikingGatewayError,
+  type OpenVikingClientPort,
+  type OpenVikingWorkspaceAuth,
 } from "./openviking-client";
 import {
   OpenVikingMemoryService,
@@ -43,6 +44,7 @@ function harness(options: {
   initialWorkspaces?: OpenVikingWorkspace[];
   credentials?: Record<string, OpenVikingWorkspaceAuth>;
   addError?: Error;
+  onCredentialsChanged?: () => void | Promise<void>;
 } = {}) {
   const workspaces = [...(options.initialWorkspaces ?? [])];
   const storedCredentials = new Map(Object.entries(options.credentials ?? {}));
@@ -162,7 +164,7 @@ function harness(options: {
     appendMessages: vi.fn(async () => undefined),
     commitSession: vi.fn(async () => ({ taskId: "task-1" })),
     getTask: vi.fn(async () => null),
-    searchMemories: vi.fn(async () => [{
+    searchMemories: vi.fn(async (_auth: OpenVikingWorkspaceAuth) => [{
       id: "viking://user/memories/events/note.md",
       workspaceId: "",
       title: "Note",
@@ -195,6 +197,7 @@ function harness(options: {
     inspectDirectory: async (rootPath) => rootPath,
     resolveIdentity: async () => "repo:github.com/acme/app",
     createId: () => "workspace-created",
+    onCredentialsChanged: options.onCredentialsChanged,
   });
   return { service, store, client, credentials, workspaces, auth, controls };
 }
@@ -390,6 +393,70 @@ describe("OpenVikingMemoryService", () => {
       after: "Release daily.",
     }]);
     expect(h.client.readSessionArtifact).toHaveBeenCalledWith(workspaceAuth, uri);
+  });
+
+  it("refreshes one stale workspace credential across concurrent searches", async () => {
+    const retained = workspace();
+    const staleAuth: OpenVikingWorkspaceAuth = {
+      accountId: OPENVIKING_ACCOUNT_ID,
+      userId: retained.userId,
+      apiKey: "stale-key",
+    };
+    const onCredentialsChanged = vi.fn(async () => { throw new Error("manifest busy"); });
+    const h = harness({
+      initialWorkspaces: [retained],
+      credentials: { [retained.id]: staleAuth },
+      onCredentialsChanged,
+    });
+    let releaseRefresh!: () => void;
+    const refreshStarted = new Promise<void>((resolve) => {
+      h.client.ensureWorkspaceUser.mockImplementation(async ({ accountId, userId }) => {
+        await new Promise<void>((release) => { releaseRefresh = release; });
+        resolve();
+        return { accountId, userId, apiKey: "fresh-key" };
+      });
+    });
+    h.client.searchMemories.mockImplementation(async (auth) => {
+      if (auth.apiKey === "stale-key") {
+        throw new OpenVikingGatewayError("Invalid API Key", "UNAUTHENTICATED", 401);
+      }
+      return [];
+    });
+
+    const searches = Promise.all([
+      h.service.searchMemories(retained.id, "first"),
+      h.service.searchMemories(retained.id, "second"),
+    ]);
+    await vi.waitFor(() => expect(h.client.ensureWorkspaceUser).toHaveBeenCalledOnce());
+    releaseRefresh();
+    await refreshStarted;
+
+    await expect(searches).resolves.toEqual([[], []]);
+    expect(h.credentials.set).toHaveBeenCalledOnce();
+    expect(h.client.searchMemories).toHaveBeenCalledTimes(4);
+    expect(onCredentialsChanged).toHaveBeenCalledOnce();
+  });
+
+  it("refreshes every managed workspace credential before hook publication", async () => {
+    const first = workspace({ id: "workspace-1", userId: "user-1" });
+    const second = workspace({ id: "workspace-2", userId: "user-2" });
+    const retained = workspace({ id: "workspace-3", userId: "user-3", managed: false });
+    const onCredentialsChanged = vi.fn();
+    const h = harness({
+      initialWorkspaces: [first, second, retained],
+      onCredentialsChanged,
+    });
+    h.client.ensureWorkspaceUser.mockImplementation(async ({ accountId, userId }) => ({
+      accountId,
+      userId,
+      apiKey: `${userId}-key`,
+    }));
+
+    await h.service.refreshManagedCredentials();
+
+    expect(h.client.ensureWorkspaceUser).toHaveBeenCalledTimes(2);
+    expect(h.credentials.set).toHaveBeenCalledTimes(2);
+    expect(onCredentialsChanged).not.toHaveBeenCalled();
   });
 
   it("turns every user edit into a locked authoritative version and reads it before OpenViking", async () => {

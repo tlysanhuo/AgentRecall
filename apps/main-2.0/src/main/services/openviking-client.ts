@@ -132,10 +132,15 @@ export class OpenVikingGateway implements OpenVikingClientPort {
         result = await this.rootClient.adminCreateAccount(input.accountId, input.userId);
       } else {
         const users = await this.rootClient.adminListUsers(input.accountId);
-        const userExists = users.some((user) => recordIdentifier(user, "user") === input.userId);
-        result = userExists
-          ? await this.rootClient.adminRegenerateKey(input.accountId, input.userId)
-          : await this.rootClient.adminRegisterUser(input.accountId, input.userId, "member");
+        const existingUser = users.find((user) => recordIdentifier(user, "user") === input.userId);
+        if (existingUser) {
+          if (typeof existingUser !== "object") {
+            throw new Error("OpenViking user response did not include credentials.");
+          }
+          result = existingUser as JsonObject;
+        } else {
+          result = await this.rootClient.adminRegisterUser(input.accountId, input.userId, "member");
+        }
       }
       return {
         accountId: input.accountId,
@@ -215,13 +220,18 @@ export class OpenVikingGateway implements OpenVikingClientPort {
     return this.normalize(async () => {
       const client = this.workspaceClient(auth);
       if (!query.trim()) {
-        const [listed, globbed] = await Promise.all([
+        const listing = await Promise.all([
           client.list("viking://user/memories", {
             recursive: true,
             nodeLimit: 1_000,
           }),
           client.glob("**/*.md", "viking://user/memories", 1_000),
-        ]);
+        ]).catch((error: unknown) => {
+          if (isNotFoundError(error)) return null;
+          throw error;
+        });
+        if (!listing) return [];
+        const [listed, globbed] = listing;
         const memories = listed
           .map((value) => normalizeMemory(value, auth.userId))
           .filter((memory): memory is OpenVikingMemoryItem => memory !== null);

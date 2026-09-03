@@ -154,7 +154,10 @@ import {
 import { resolveOpenVikingRuntimeArchitecture } from "./services/openviking-runtime-architecture";
 import { OpenVikingGateway } from "./services/openviking-client";
 import { OpenVikingControlService } from "./services/openviking-control-service";
-import { OpenVikingHookManifestService } from "./services/openviking-hook-manifest";
+import {
+  OpenVikingHookManifestPublisher,
+  OpenVikingHookManifestService,
+} from "./services/openviking-hook-manifest";
 import { OpenVikingHookStateFlusher } from "./services/openviking-hook-state-flusher";
 import { SshCommandService } from "./services/ssh-command-service";
 import { SshCredentialService } from "./services/ssh-credential-service";
@@ -354,7 +357,10 @@ let disposeTeamChatIpc: (() => void) | null = null;
 let disposeOpenVikingMemoryIpc: (() => void) | null = null;
 let openVikingRuntimeService: OpenVikingRuntimeService | null = null;
 let openVikingControlService: OpenVikingControlService | null = null;
+let openVikingMemoryService: OpenVikingMemoryService | null = null;
 let openVikingHookManifestService: OpenVikingHookManifestService | null = null;
+let openVikingHookManifestPublisher: OpenVikingHookManifestPublisher | null = null;
+let openVikingCredentialsValidatedFor: string | null = null;
 let openVikingHookStateFlusher: OpenVikingHookStateFlusher | null = null;
 let automationQuitReady = false;
 let automationQuitStarted = false;
@@ -1341,7 +1347,7 @@ function initializeOpenVikingMemory(): void {
   let control: OpenVikingControlService;
   const client = new AutoStartingOpenVikingClient({
     ensureRunning: async () => {
-      await control.startRuntime();
+      if ((await runtime.getStatus()).state !== "running") await control.startRuntime();
     },
     getConnection: () => runtime.getConnection(),
     createClient: (connection) => new OpenVikingGateway(connection),
@@ -1351,6 +1357,7 @@ function initializeOpenVikingMemory(): void {
     store,
     client,
     credentials,
+    onCredentialsChanged: refreshOpenVikingHookManifest,
   });
   const hookManifest = new OpenVikingHookManifestService({
     rootDir,
@@ -1378,11 +1385,15 @@ function initializeOpenVikingMemory(): void {
     };
   };
   openVikingRuntimeService = runtime;
+  openVikingMemoryService = memory;
   openVikingHookManifestService = hookManifest;
+  openVikingHookManifestPublisher = new OpenVikingHookManifestPublisher(
+    publishOpenVikingHookManifest,
+  );
   openVikingHookStateFlusher = new OpenVikingHookStateFlusher({
     stateDir: hookManifest.stateDir(),
     client,
-    credentials,
+    withAuth: (workspaceId, operation) => memory.withWorkspaceAuth(workspaceId, operation),
     control: store,
     snapshot: async () => {
       const { settings, vlm } = await resolveExtractionState();
@@ -1464,11 +1475,21 @@ function openVikingIntegrations(settings: AppSettings): { claude: boolean; codex
 }
 
 async function refreshOpenVikingHookManifest(): Promise<void> {
+  await openVikingHookManifestPublisher?.refresh();
+}
+
+async function publishOpenVikingHookManifest(): Promise<void> {
   if (!openVikingHookManifestService || !openVikingRuntimeService) return;
   const runtimeStatus = await openVikingRuntimeService.getStatus();
   let baseUrl: string | null = null;
   if (runtimeStatus.state === "running") {
     baseUrl = (await openVikingRuntimeService.getConnection()).baseUrl;
+    if (openVikingCredentialsValidatedFor !== baseUrl) {
+      await openVikingMemoryService?.refreshManagedCredentials();
+      openVikingCredentialsValidatedFor = baseUrl;
+    }
+  } else {
+    openVikingCredentialsValidatedFor = null;
   }
   const manifestPath = await openVikingHookManifestService.write({
     baseUrl,
