@@ -146,7 +146,7 @@ describe("OpenVikingGateway", () => {
     });
   });
 
-  it("regenerates credentials when a previous add already created the workspace user", async () => {
+  it("reuses credentials when the workspace user already exists", async () => {
     const gateway = new OpenVikingGateway({ baseUrl, rootApiKey: "root-key" });
 
     await expect(gateway.ensureWorkspaceUser({
@@ -155,13 +155,12 @@ describe("OpenVikingGateway", () => {
     })).resolves.toEqual({
       accountId: "agent-recall-existing",
       userId: "workspace_existing",
-      apiKey: "regenerated-workspace-key",
+      apiKey: "workspace-key",
     });
 
     expect(requests.map((request) => [request.method, request.path])).toEqual([
       ["GET", "/api/v1/admin/accounts"],
       ["GET", "/api/v1/admin/accounts/agent-recall-existing/users"],
-      ["POST", "/api/v1/admin/accounts/agent-recall-existing/users/workspace_existing/key"],
     ]);
   });
 
@@ -391,6 +390,24 @@ describe("OpenVikingGateway", () => {
     ]);
   });
 
+  it("returns an empty list before the workspace has created a memory directory", async () => {
+    failure = {
+      path: "/api/v1/fs/ls",
+      status: 404,
+      body: {
+        status: "error",
+        error: { code: "NOT_FOUND", message: "Directory not found: viking://user/memories" },
+      },
+    };
+    const gateway = new OpenVikingGateway({ baseUrl, rootApiKey: "root-key" });
+
+    await expect(gateway.searchMemories({
+      accountId: "agent-recall-v2",
+      userId: "workspace_empty",
+      apiKey: "workspace-key",
+    }, "")).resolves.toEqual([]);
+  });
+
   it("turns SDK failures into stable retryable gateway errors", async () => {
     failure = {
       path: "/api/v1/search/find",
@@ -503,22 +520,13 @@ describe("OpenVikingGateway", () => {
     if (url.pathname === "/api/v1/admin/accounts/agent-recall-existing/users" && request.method === "GET") {
       return sendJson(response, 200, {
         status: "ok",
-        result: [{ user_id: "workspace_existing" }],
+        result: [{ user_id: "workspace_existing", api_key: "workspace-key" }],
       });
     }
     if (url.pathname === "/api/v1/admin/accounts/agent-recall-existing/users" && request.method === "POST") {
       return sendJson(response, 200, {
         status: "ok",
         result: { user_key: "workspace-key" },
-      });
-    }
-    if (
-      url.pathname === "/api/v1/admin/accounts/agent-recall-existing/users/workspace_existing/key"
-      && request.method === "POST"
-    ) {
-      return sendJson(response, 200, {
-        status: "ok",
-        result: { user_key: "regenerated-workspace-key" },
       });
     }
     if (url.pathname === "/api/v1/admin/accounts/agent-recall-v2/users/workspace_abcd" && request.method === "DELETE") {

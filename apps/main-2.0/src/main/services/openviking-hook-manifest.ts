@@ -33,6 +33,33 @@ interface HookWorkspace extends OpenVikingWorkspaceAuth {
   recallTokenBudget: number;
 }
 
+export class OpenVikingHookManifestPublisher {
+  private dirty = false;
+  private running: Promise<void> | null = null;
+
+  constructor(private readonly publish: () => Promise<void>) {}
+
+  refresh(): Promise<void> {
+    this.dirty = true;
+    this.running ??= this.flush();
+    return this.running;
+  }
+
+  private async flush(): Promise<void> {
+    try {
+      while (this.dirty) {
+        this.dirty = false;
+        await this.publish();
+      }
+    } catch (error) {
+      this.dirty = true;
+      throw error;
+    } finally {
+      this.running = null;
+    }
+  }
+}
+
 export class OpenVikingHookManifestService {
   private readonly filePath: string;
 

@@ -37,10 +37,11 @@ import type {
   RecordOpenVikingMemoryFeedbackInput,
   SaveOpenVikingMemoryControlInput,
 } from "../../core/postgres/openviking-memory-repository";
-import type {
-  OpenVikingClientPort,
-  OpenVikingWorkspaceAuth,
-  SaveOpenVikingMemoryInput,
+import {
+  OpenVikingGatewayError,
+  type OpenVikingClientPort,
+  type OpenVikingWorkspaceAuth,
+  type SaveOpenVikingMemoryInput,
 } from "./openviking-client";
 
 const execFileAsync = promisify(execFile);
@@ -91,6 +92,7 @@ interface OpenVikingMemoryServiceOptions {
   inspectDirectory?: (rootPath: string) => Promise<string>;
   resolveIdentity?: (rootPath: string) => Promise<string>;
   createId?: () => string;
+  onCredentialsChanged?: () => void | Promise<void>;
 }
 
 export class OpenVikingMemoryService {
@@ -98,6 +100,7 @@ export class OpenVikingMemoryService {
   private readonly resolveIdentity: NonNullable<OpenVikingMemoryServiceOptions["resolveIdentity"]>;
   private readonly createId: NonNullable<OpenVikingMemoryServiceOptions["createId"]>;
   private workspaceMutationQueue: Promise<void> = Promise.resolve();
+  private readonly authRefreshes = new Map<string, Promise<OpenVikingWorkspaceAuth>>();
 
   constructor(private readonly options: OpenVikingMemoryServiceOptions) {
     this.inspectDirectory = options.inspectDirectory ?? inspectDirectory;
@@ -186,8 +189,7 @@ export class OpenVikingMemoryService {
         await this.options.credentials.delete(workspaceId);
         return;
       }
-      const auth = await this.requireAuth(workspace);
-      await this.options.client.deleteWorkspaceUser(auth);
+      await this.withAuth(workspace, (auth) => this.options.client.deleteWorkspaceUser(auth));
       await this.options.store.deleteOpenVikingWorkspace(workspaceId);
       await this.options.credentials.delete(workspaceId);
     });
@@ -209,11 +211,11 @@ export class OpenVikingMemoryService {
     return this.runObserved(workspaceId, "search", async () => {
       const workspace = await this.requireWorkspace(workspaceId);
       const [memories, controls] = await Promise.all([
-        this.options.client.searchMemories(
-          await this.requireAuth(workspace),
+        this.withAuth(workspace, (auth) => this.options.client.searchMemories(
+          auth,
           query,
           limit,
-        ),
+        )),
         this.options.store.listOpenVikingMemoryControls(workspaceId),
       ]);
       const controlsByUri = new Map(controls.map((control) => [control.uri, control]));
@@ -234,7 +236,7 @@ export class OpenVikingMemoryService {
       const memoryUri = canonicalOpenVikingMemoryUri(uri, workspace.userId);
       const control = await this.options.store.getOpenVikingMemoryControl(workspaceId, memoryUri);
       if (control?.locked && control.lockedContent !== undefined) return control.lockedContent;
-      return this.options.client.readMemory(await this.requireAuth(workspace), memoryUri);
+      return this.withAuth(workspace, (auth) => this.options.client.readMemory(auth, memoryUri));
     }, { uri: canonicalOpenVikingMemoryUri(uri) });
   }
 
@@ -243,11 +245,24 @@ export class OpenVikingMemoryService {
     memoryDiffUri: string,
   ): Promise<OpenVikingMemoryChange[]> {
     const workspace = await this.requireWorkspace(workspaceId);
-    const content = await this.options.client.readSessionArtifact(
-      await this.requireAuth(workspace),
-      memoryDiffUri,
-    );
+    const content = await this.withAuth(workspace, (auth) => (
+      this.options.client.readSessionArtifact(auth, memoryDiffUri)
+    ));
     return parseOpenVikingMemoryDiff(content, workspace.userId);
+  }
+
+  async refreshManagedCredentials(): Promise<void> {
+    const workspaces = await this.options.store.listOpenVikingWorkspaces();
+    for (const workspace of workspaces) {
+      if (workspace.managed) await this.refreshAuth(workspace, false);
+    }
+  }
+
+  async withWorkspaceAuth<T>(
+    workspaceId: string,
+    operation: (auth: OpenVikingWorkspaceAuth) => Promise<T>,
+  ): Promise<T> {
+    return this.withAuth(await this.requireWorkspace(workspaceId), operation);
   }
 
   async saveMemory(
@@ -262,10 +277,10 @@ export class OpenVikingMemoryService {
       const existing = memoryUri
         ? await this.options.store.getOpenVikingMemoryControl(workspaceId, memoryUri)
         : null;
-      const saved = await this.options.client.saveMemory(await this.requireAuth(workspace), {
+      const saved = await this.withAuth(workspace, (auth) => this.options.client.saveMemory(auth, {
         ...input,
         ...(memoryUri ? { uri: memoryUri } : {}),
-      });
+      }));
       const control = await this.options.store.saveOpenVikingUserMemory({
         workspaceId,
         uri: saved.id,
@@ -281,7 +296,7 @@ export class OpenVikingMemoryService {
     await this.runObserved(workspaceId, "delete", async () => {
       const workspace = await this.requireWorkspace(workspaceId);
       const memoryUri = canonicalOpenVikingMemoryUri(uri, workspace.userId);
-      await this.options.client.deleteMemory(await this.requireAuth(workspace), memoryUri);
+      await this.withAuth(workspace, (auth) => this.options.client.deleteMemory(auth, memoryUri));
       await this.options.store.markOpenVikingMemoryDeleted(workspaceId, memoryUri);
     }, { uri: canonicalOpenVikingMemoryUri(uri) });
   }
@@ -336,12 +351,50 @@ export class OpenVikingMemoryService {
   private async requireAuth(workspace: OpenVikingWorkspace): Promise<OpenVikingWorkspaceAuth> {
     const existing = await this.options.credentials.get(workspace.id);
     if (existing) return existing;
-    const created = await this.options.client.ensureWorkspaceUser({
-      accountId: OPENVIKING_ACCOUNT_ID,
-      userId: workspace.userId,
-    });
-    await this.options.credentials.set(workspace.id, created);
-    return created;
+    return this.refreshAuth(workspace);
+  }
+
+  private refreshAuth(
+    workspace: OpenVikingWorkspace,
+    publishCredentials = true,
+  ): Promise<OpenVikingWorkspaceAuth> {
+    const existing = this.authRefreshes.get(workspace.id);
+    if (existing) return existing;
+    const refresh = (async () => {
+      const created = await this.options.client.ensureWorkspaceUser({
+        accountId: OPENVIKING_ACCOUNT_ID,
+        userId: workspace.userId,
+      });
+      await this.options.credentials.set(workspace.id, created);
+      if (publishCredentials) this.publishCredentialsChanged();
+      return created;
+    })();
+    this.authRefreshes.set(workspace.id, refresh);
+    const cleanup = () => {
+      if (this.authRefreshes.get(workspace.id) === refresh) this.authRefreshes.delete(workspace.id);
+    };
+    void refresh.then(cleanup, cleanup);
+    return refresh;
+  }
+
+  private publishCredentialsChanged(): void {
+    try {
+      void Promise.resolve(this.options.onCredentialsChanged?.()).catch(() => undefined);
+    } catch {
+      // The credential is authoritative; a later refresh retries derived manifest publication.
+    }
+  }
+
+  private async withAuth<T>(
+    workspace: OpenVikingWorkspace,
+    operation: (auth: OpenVikingWorkspaceAuth) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await operation(await this.requireAuth(workspace));
+    } catch (error) {
+      if (!(error instanceof OpenVikingGatewayError) || error.code !== "UNAUTHENTICATED") throw error;
+    }
+    return operation(await this.refreshAuth(workspace));
   }
 
   private runWorkspaceMutation<T>(operation: () => Promise<T>): Promise<T> {

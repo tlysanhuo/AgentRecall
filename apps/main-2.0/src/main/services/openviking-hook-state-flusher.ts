@@ -10,8 +10,7 @@ import {
   type OpenVikingRecallTrace,
 } from "../../core/openviking-memory-control";
 import { parseOpenVikingMemoryDiff } from "../../core/openviking-memory-diff";
-import type { OpenVikingClientPort } from "./openviking-client";
-import type { OpenVikingCredentialStorePort } from "./openviking-memory-service";
+import type { OpenVikingClientPort, OpenVikingWorkspaceAuth } from "./openviking-client";
 
 interface OpenVikingHookStateFlusherOptions {
   stateDir: string;
@@ -19,7 +18,10 @@ interface OpenVikingHookStateFlusherOptions {
     OpenVikingClientPort,
     "commitSession" | "getTask" | "readSessionArtifact" | "writeMemoryContent"
   >;
-  credentials: Pick<OpenVikingCredentialStorePort, "get">;
+  withAuth<T>(
+    workspaceId: string,
+    operation: (auth: OpenVikingWorkspaceAuth) => Promise<T>,
+  ): Promise<T>;
   control: {
     upsertOpenVikingCommitRun(run: OpenVikingCommitRun): Promise<void>;
     applyOpenVikingCommitResult(
@@ -226,16 +228,15 @@ export class OpenVikingHookStateFlusher {
       || !Number.isFinite(updatedAt)
       || now - updatedAt < (this.options.idleMs ?? DEFAULT_IDLE_MS)
     ) return changed;
-    const auth = await this.options.credentials.get(state.workspaceId);
-    if (!auth) return changed;
-
     const prepared = await this.prepareIdleCommit(filePath, now);
     if (!prepared) return changed;
     const { request, state: commitState } = prepared;
     const startedAt = request.startedAt!;
     let taskId: string;
     try {
-      taskId = (await this.options.client.commitSession(auth, commitState.sessionId!)).taskId;
+      taskId = await this.options.withAuth(commitState.workspaceId!, async (auth) => (
+        (await this.options.client.commitSession(auth, commitState.sessionId!)).taskId
+      ));
     } catch (error) {
       await this.clearCommitRequest(filePath, request.requestId!);
       await this.options.control.recordOpenVikingOperationEvent({
@@ -371,16 +372,20 @@ export class OpenVikingHookStateFlusher {
   }> {
     const completedTaskIds = new Set<string>();
     let lastOutcome: { taskId: string; state: "completed" | "failed" } | undefined;
-    const auth = await this.options.credentials.get(state.workspaceId!);
-    if (!auth) return { completedTaskIds };
     for (const task of state.commitTasks ?? []) {
       const taskId = String(task?.taskId || "");
       if (!taskId) continue;
       const run = toCommitRun(state, task, "running");
       await this.options.control.upsertOpenVikingCommitRun(run);
       let remoteTask: OpenVikingTaskRecord | null;
+      let userId: string;
       try {
-        remoteTask = await this.options.client.getTask(auth, taskId) as OpenVikingTaskRecord | null;
+        const loaded = await this.options.withAuth(state.workspaceId!, async (auth) => ({
+          remoteTask: await this.options.client.getTask(auth, taskId) as OpenVikingTaskRecord | null,
+          userId: auth.userId,
+        }));
+        remoteTask = loaded.remoteTask;
+        userId = loaded.userId;
       } catch {
         continue;
       }
@@ -402,12 +407,14 @@ export class OpenVikingHookStateFlusher {
       if (memoryDiffUri) {
         let memoryDiff: string;
         try {
-          memoryDiff = await this.options.client.readSessionArtifact(auth, memoryDiffUri);
+          memoryDiff = await this.options.withAuth(state.workspaceId!, (auth) => (
+            this.options.client.readSessionArtifact(auth, memoryDiffUri)
+          ));
         } catch {
           continue;
         }
         try {
-          changes = parseOpenVikingMemoryDiff(memoryDiff, auth.userId);
+          changes = parseOpenVikingMemoryDiff(memoryDiff, userId);
         } catch (error) {
           const completedAt = new Date(now).toISOString();
           await this.recordFailedCommitTask(
@@ -457,12 +464,14 @@ export class OpenVikingHookStateFlusher {
       let restored = 0;
       try {
         for (const conflict of conflicts) {
-          await this.options.client.writeMemoryContent(
-            auth,
-            conflict.uri,
-            conflict.content,
-            conflict.title,
-          );
+          await this.options.withAuth(state.workspaceId!, (auth) => (
+            this.options.client.writeMemoryContent(
+              auth,
+              conflict.uri,
+              conflict.content,
+              conflict.title,
+            )
+          ));
           restored += 1;
         }
       } catch {

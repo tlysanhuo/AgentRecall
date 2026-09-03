@@ -36,6 +36,19 @@ function client() {
   };
 }
 
+type WithAuth = <T>(
+  workspaceId: string,
+  operation: (workspaceAuth: typeof auth) => Promise<T>,
+) => Promise<T>;
+
+function withAuth(): WithAuth {
+  const run: WithAuth = async <T>(
+    _workspaceId: string,
+    operation: (workspaceAuth: typeof auth) => Promise<T>,
+  ) => operation(auth);
+  return vi.fn(run) as WithAuth;
+}
+
 describe("OpenVikingHookStateFlusher", () => {
   it("removes abandoned submitted prompts after their retention window", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-recall-openviking-submitted-turns-"));
@@ -67,7 +80,7 @@ describe("OpenVikingHookStateFlusher", () => {
       stateDir,
       client: openViking,
       control: control(),
-      credentials: { get: vi.fn(async () => auth) },
+      withAuth: withAuth(),
       onStateChanged,
     });
 
@@ -110,17 +123,19 @@ describe("OpenVikingHookStateFlusher", () => {
     }));
     const openViking = client();
     const memoryControl = control();
+    const runWithAuth = withAuth();
     const flusher = new OpenVikingHookStateFlusher({
       stateDir,
       idleMs: 120_000,
       client: openViking,
       control: memoryControl,
-      credentials: { get: vi.fn(async () => auth) },
+      withAuth: runWithAuth,
     });
 
     await flusher.flushIdle(Date.parse("2026-07-30T00:03:00.000Z"));
 
     expect(openViking.commitSession).toHaveBeenCalledOnce();
+    expect(runWithAuth).toHaveBeenCalledOnce();
     expect(openViking.commitSession).toHaveBeenCalledWith(auth, "session-idle");
     expect(JSON.parse(await readFile(idlePath, "utf8"))).toMatchObject({
       pendingTokenEstimate: 0,
@@ -183,7 +198,7 @@ describe("OpenVikingHookStateFlusher", () => {
       idleMs: 120_000,
       client: openViking,
       control: control(),
-      credentials: { get: vi.fn(async () => auth) },
+      withAuth: withAuth(),
     });
 
     await flusher.flushIdle(Date.parse("2026-08-05T00:03:00.000Z"));
@@ -221,7 +236,7 @@ describe("OpenVikingHookStateFlusher", () => {
       idleMs: 1,
       client: openViking,
       control: memoryControl,
-      credentials: { get: vi.fn(async () => auth) },
+      withAuth: withAuth(),
     });
 
     await flusher.flushIdle(Date.parse("2026-07-30T00:01:00.000Z"));
@@ -296,7 +311,7 @@ describe("OpenVikingHookStateFlusher", () => {
       stateDir,
       client: openViking,
       control: memoryControl,
-      credentials: { get: vi.fn(async () => auth) },
+      withAuth: withAuth(),
       snapshot: vi.fn(async () => ({
         modelSnapshot: {
           provider: "openai-codex",
@@ -394,7 +409,7 @@ describe("OpenVikingHookStateFlusher", () => {
       stateDir,
       client: openViking,
       control: memoryControl,
-      credentials: { get: vi.fn(async () => auth) },
+      withAuth: withAuth(),
     });
 
     await flusher.flushIdle(Date.parse("2026-08-05T00:01:00.000Z"));
@@ -433,7 +448,7 @@ describe("OpenVikingHookStateFlusher", () => {
       stateDir,
       client: openViking,
       control: memoryControl,
-      credentials: { get: vi.fn(async () => auth) },
+      withAuth: withAuth(),
     });
 
     await flusher.flushIdle(Date.parse("2026-08-05T00:01:00.000Z"));
@@ -492,7 +507,7 @@ describe("OpenVikingHookStateFlusher", () => {
       stateDir,
       client: openViking,
       control: memoryControl,
-      credentials: { get: vi.fn(async () => auth) },
+      withAuth: withAuth(),
     });
 
     await flusher.flushIdle(Date.parse("2026-08-05T00:01:00.000Z"));
@@ -555,7 +570,7 @@ describe("OpenVikingHookStateFlusher", () => {
       stateDir,
       client: openViking,
       control: memoryControl,
-      credentials: { get: vi.fn(async () => auth) },
+      withAuth: withAuth(),
     });
 
     await flusher.flushIdle(Date.parse("2026-08-05T00:01:00.000Z"));
@@ -606,7 +621,7 @@ describe("OpenVikingHookStateFlusher", () => {
       stateDir,
       client: client(),
       control: memoryControl,
-      credentials: { get: vi.fn(async () => auth) },
+      withAuth: withAuth(),
     });
 
     await flusher.flushIdle();
