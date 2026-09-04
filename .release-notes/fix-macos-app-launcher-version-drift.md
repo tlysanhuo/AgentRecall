@@ -1,6 +1,6 @@
 # 修复 macOS 启动器在新版本安装后仍启动旧版本
 
-<!-- release-target: v1 -->
+<!-- release-target: both -->
 
 ## Bug 修复
 
